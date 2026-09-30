@@ -1,0 +1,54 @@
+{
+  "name": "@playcanvas/inspector",
+  "version": "0.1.0",
+  "description": "A debug panel for PlayCanvas apps: the entity hierarchy, assets, frame graph, render targets, textures, meshes, materials, scripts, cameras, memory, shaders and physics of a running app",
+  "author": "PlayCanvas <support@playcanvas.com>",
+  "homepage": "https://github.com/playcanvas/inspector#readme",
+  "bugs": {
+    "url": "https://github.com/playcanvas/inspector/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/playcanvas/inspector.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "playcanvas",
+    "inspector",
+    "debug",
+    "devtools",
+    "webgl",
+    "webgpu"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "lint": "eslint src test",
+    "lint:fix": "eslint --fix src test",
+    "test": "mocha --recursive test --timeout 5000"
+  },
+  "peerDependencies": {
+    "playcanvas": "^2.23.0-beta.24"
+  },
+  "devDependencies": {
+    "@playcanvas/eslint-config": "3.0.0-beta.8",
+    "chai": "6.2.2",
+    "eslint": "9.39.5",
+    "globals": "17.12.0",
+    "jsdom": "30.1.0",
+    "mocha": "12.0.2",
+    "playcanvas": "2.23.0-beta.24"
+  }
+}
