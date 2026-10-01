@@ -1,5 +1,14 @@
 # PlayCanvas Inspector
 
+[![NPM Version](https://img.shields.io/npm/v/@playcanvas/inspector)](https://www.npmjs.com/package/@playcanvas/inspector)
+[![NPM Downloads](https://img.shields.io/npm/dw/@playcanvas/inspector)](https://npmtrends.com/@playcanvas/inspector)
+[![License](https://img.shields.io/npm/l/@playcanvas/inspector)](https://github.com/playcanvas/inspector/blob/main/LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-5865F2?style=flat&logo=discord&logoColor=white&color=black)](https://discord.gg/RSaMRzg)
+[![Reddit](https://img.shields.io/badge/Reddit-FF4500?style=flat&logo=reddit&logoColor=white&color=black)](https://www.reddit.com/r/PlayCanvas)
+[![X](https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white&color=black)](https://x.com/intent/follow?screen_name=playcanvas)
+
+| [User Manual](https://developer.playcanvas.com) | [Blog](https://blog.playcanvas.com) | [Forum](https://forum.playcanvas.com) |
+
 A debug panel for running [PlayCanvas](https://github.com/playcanvas/engine) apps. It shows the entity
 hierarchy and every component's properties, and tabs for the cameras, assets, frame graph, render
 targets, textures, meshes, materials, scripts, memory, shaders and physics of the app, with live
