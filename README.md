@@ -1,5 +1,14 @@
 # PlayCanvas Inspector
 
+[![NPM Version](https://img.shields.io/npm/v/@playcanvas/inspector)](https://www.npmjs.com/package/@playcanvas/inspector)
+[![NPM Downloads](https://img.shields.io/npm/dw/@playcanvas/inspector)](https://npmtrends.com/@playcanvas/inspector)
+[![License](https://img.shields.io/npm/l/@playcanvas/inspector)](https://github.com/playcanvas/inspector/blob/main/LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-5865F2?style=flat&logo=discord&logoColor=white&color=black)](https://discord.gg/RSaMRzg)
+[![Reddit](https://img.shields.io/badge/Reddit-FF4500?style=flat&logo=reddit&logoColor=white&color=black)](https://www.reddit.com/r/PlayCanvas)
+[![X](https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white&color=black)](https://x.com/intent/follow?screen_name=playcanvas)
+
+| [User Manual](https://developer.playcanvas.com) | [Blog](https://blog.playcanvas.com) | [Forum](https://forum.playcanvas.com) |
+
 A debug panel for running [PlayCanvas](https://github.com/playcanvas/engine) apps. It shows the entity
 hierarchy and every component's properties, and tabs for the cameras, assets, frame graph, render
 targets, textures, meshes, materials, scripts, memory, shaders and physics of the app, with live
@@ -45,8 +54,8 @@ app.root.addChild(entity);
 ## Engine versions
 
 Each inspector release names the engine versions it supports in its `playcanvas` peer dependency.
-The inspector reads engine internals to show what it shows, so it is tied to engine releases
-rather than claiming a wide version range.
+The inspector reads engine internals to show what it shows, so a new engine release can need a new
+inspector release.
 
 ## The devtools hook
 
@@ -73,6 +82,7 @@ npm run lint
 npm test
 npm run build:types # writes the TypeScript declarations to types/
 npm run test:types  # compiles a TypeScript usage of the package against them
+npm run publint     # checks the package is publishable
 ```
 
 The tests run against the `playcanvas` version in `devDependencies`, on the engine's null graphics
@@ -81,29 +91,6 @@ device under jsdom.
 A few engine helpers the inspector draws with are copied into `src/renderers`, `src/picker` and
 `src/input`, so the inspector does not depend on them being in the app's engine build. See
 [COPIED_FROM.md](COPIED_FROM.md).
-
-## Releasing
-
-Releases are published to npm from GitHub Actions when a version tag is pushed. Only repository
-admins and maintainers can push tags.
-
-1. Update your `main` to the commit to release, with CI green.
-2. Bump the version and tag it:
-
-   ```sh
-   npm version minor # or major, or patch
-   ```
-
-3. Push the commit and the tag:
-
-   ```sh
-   git push --follow-tags
-   ```
-
-The **Publish** workflow runs the lint and tests, publishes to npm with provenance, and creates a
-GitHub release with generated notes.
-
-A tag that does not match the `package.json` version fails the run without publishing.
 
 ## License
 

@@ -15,11 +15,11 @@ jobs:
             id-token: write
         steps:
             - name: Check out code
-              uses: actions/checkout@v5
+              uses: actions/checkout@v7
 
             # Node 24 for npm 11, which trusted publishing needs
             - name: Set up Node.js
-              uses: actions/setup-node@v6
+              uses: actions/setup-node@v7
               with:
                   node-version: 24.x
                   cache: 'npm'
@@ -47,6 +47,9 @@ jobs:
 
             - name: Test Types
               run: npm run test:types
+
+            - name: Run Publint
+              run: npm run publint
 
             - name: Publish to npm
               run: npm publish --provenance --access public
