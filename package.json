@@ -36,8 +36,12 @@
     "LICENSE"
   ],
   "sideEffects": false,
-  "engines": {
-    "node": ">=22.19.0"
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=22.19.0",
+      "onFail": "error"
+    }
   },
   "scripts": {
     "lint": "eslint src test",
@@ -48,7 +52,7 @@
     "test:types": "tsc -p test/types"
   },
   "peerDependencies": {
-    "playcanvas": "^2.23.0-beta.24"
+    "playcanvas": "^2.23.0"
   },
   "devDependencies": {
     "@playcanvas/eslint-config": "3.0.0-beta.8",
@@ -57,7 +61,7 @@
     "globals": "17.12.0",
     "jsdom": "30.1.0",
     "mocha": "12.0.2",
-    "playcanvas": "2.23.0-beta.24",
+    "playcanvas": "2.23.0",
     "publint": "0.3.24",
     "typescript": "5.9.3"
   }
