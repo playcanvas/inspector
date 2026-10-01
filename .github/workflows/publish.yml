@@ -1,0 +1,55 @@
+name: Publish
+
+on:
+    push:
+        tags:
+            - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+    publish:
+        name: Publish
+        runs-on: ubuntu-latest
+        if: github.repository_owner == 'playcanvas'
+        # waits for approval, and npm only trusts publishes from this environment
+        environment: npm
+        permissions:
+            contents: write
+            id-token: write
+        steps:
+            - name: Check out code
+              uses: actions/checkout@v5
+
+            # Node 24 for npm 11, which trusted publishing needs
+            - name: Set up Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: 24.x
+                  cache: 'npm'
+                  registry-url: 'https://registry.npmjs.org/'
+
+            - name: Check the tag matches package.json
+              run: |
+                  VERSION=$(node -p "require('./package.json').version")
+                  if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+                      echo "Tag $GITHUB_REF_NAME does not match package.json version $VERSION"
+                      exit 1
+                  fi
+
+            - name: Install Dependencies
+              run: npm ci
+
+            - name: Run ESLint
+              run: npm run lint
+
+            - name: Run Tests
+              run: npm test
+
+            - name: Publish to npm
+              run: npm publish --provenance --access public
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v3
+              with:
+                  generate_release_notes: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -15,8 +15,8 @@ and view-only overrides (render modes, wireframe, a flown camera) it removes whe
 npm install @playcanvas/inspector
 ```
 
-`playcanvas` is a peer dependency: the inspector works on your app's own engine, so it must be the
-same `playcanvas` package your app imports.
+It requires PlayCanvas Engine 2.23 or newer. `playcanvas` is a peer dependency: the inspector works
+on your app's own engine, so it must be the same `playcanvas` package your app imports.
 
 ## Use
 
@@ -48,8 +48,8 @@ rather than claiming a wide version range.
 
 ## The devtools hook
 
-From the engine release that adds it, every PlayCanvas app announces itself to a hook defined on
-the global object, which is how the upcoming browser extension finds apps on any page:
+From engine 2.23, every PlayCanvas app announces itself to a hook defined on the global object,
+which is how the upcoming browser extension finds apps on any page:
 
 ```javascript
 globalThis[Symbol.for('playcanvas.inspector')] = {
@@ -58,8 +58,8 @@ globalThis[Symbol.for('playcanvas.inspector')] = {
 };
 ```
 
-The hook must be defined before the engine creates the app. `register` is called as each app is
-constructed and `unregister` as it is destroyed. `protocol` is `1`.
+The hook must be defined before the engine creates the app. `register` is called once each app is
+initialized, and `unregister` when it is destroyed. `protocol` is `1`.
 
 ## Development
 
@@ -77,6 +77,29 @@ device under jsdom.
 A few engine helpers the inspector draws with are copied into `src/renderers`, `src/picker` and
 `src/input`, so the inspector does not depend on them being in the app's engine build. See
 [COPIED_FROM.md](COPIED_FROM.md).
+
+## Releasing
+
+Releases are published to npm from GitHub Actions when a version tag is pushed. Only repository
+admins can push `v*` tags, and each publish waits for approval in the `npm` environment.
+
+1. Update your `main` to the commit to release, with CI green.
+2. Bump the version and tag it:
+
+   ```sh
+   npm version minor # or major, or patch
+   ```
+
+3. Push the commit and the tag:
+
+   ```sh
+   git push --follow-tags
+   ```
+
+4. Approve the **Publish** run in the Actions tab. It runs the lint and tests, publishes to npm
+   with provenance, and creates a GitHub release with generated notes.
+
+A tag that does not match the `package.json` version fails the run without publishing.
 
 ## License
 
