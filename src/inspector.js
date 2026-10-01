@@ -1311,7 +1311,6 @@ class Inspector {
         const title = el('span', 'pci-title', 'Inspector');
         this._pauseBtn = iconButton('pause', 'Pause');
         this._stepBtn = iconButton('step', 'Step');
-        const refreshBtn = iconButton('refresh', 'Refresh');
         this._pickBtn = iconButton('pick', 'Pick');
         this._flyBtn = iconButton('fly', 'Fly');
         this._orbitBtn = iconButton('orbit', 'Orbit');
@@ -1323,12 +1322,10 @@ class Inspector {
         const closeBtn = iconButton('close', 'Hide');
         const toggleLabel = Inspector._keyLabel(this._toggleKey);
         setTip(closeBtn, `Hide the panel${toggleLabel ? `. Press ${toggleLabel} to show it again` : ''}`);
-        setTip(refreshBtn, 'Rebuild the list and the properties now, instead of at the next refresh');
         toolbar.append(
             title,
             this._pauseBtn, this._stepBtn, el('span', 'pci-sep'),
-            this._pickBtn, this._flyBtn, this._orbitBtn, el('span', 'pci-sep'),
-            refreshBtn,
+            this._pickBtn, this._flyBtn, this._orbitBtn,
             el('span', 'pci-spacer'),
             this._popBtn, closeBtn
         );
@@ -1340,7 +1337,6 @@ class Inspector {
         this._pickBtn.addEventListener('click', () => this._setPicking(this._canvasMode !== 'pick'));
         this._flyBtn.addEventListener('click', () => this._toggleDrive('fly'));
         this._orbitBtn.addEventListener('click', () => this._toggleDrive('orbit'));
-        refreshBtn.addEventListener('click', () => this._refresh());
         this._popBtn.addEventListener('click', () => {
             if (this._popup) this._dockBack();
             else this._popOut();
