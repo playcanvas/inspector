@@ -1,6 +1,6 @@
 {
   "name": "@playcanvas/inspector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A debug panel for PlayCanvas apps: the entity hierarchy, assets, frame graph, render targets, textures, meshes, materials, scripts, cameras, memory, shaders and physics of a running app",
   "author": "PlayCanvas <support@playcanvas.com>",
   "homepage": "https://github.com/playcanvas/inspector#readme",
