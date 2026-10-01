@@ -81,7 +81,7 @@ A few engine helpers the inspector draws with are copied into `src/renderers`, `
 ## Releasing
 
 Releases are published to npm from GitHub Actions when a version tag is pushed. Only repository
-admins can push `v*` tags, and each publish waits for approval in the `npm` environment.
+admins and maintainers can push tags.
 
 1. Update your `main` to the commit to release, with CI green.
 2. Bump the version and tag it:
@@ -96,8 +96,8 @@ admins can push `v*` tags, and each publish waits for approval in the `npm` envi
    git push --follow-tags
    ```
 
-4. Approve the **Publish** run in the Actions tab. It runs the lint and tests, publishes to npm
-   with provenance, and creates a GitHub release with generated notes.
+The **Publish** workflow runs the lint and tests, publishes to npm with provenance, and creates a
+GitHub release with generated notes.
 
 A tag that does not match the `package.json` version fails the run without publishing.
 

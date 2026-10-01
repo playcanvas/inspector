@@ -10,8 +10,6 @@ jobs:
         name: Publish
         runs-on: ubuntu-latest
         if: github.repository_owner == 'playcanvas'
-        # waits for approval, and npm only trusts publishes from this environment
-        environment: npm
         permissions:
             contents: write
             id-token: write
