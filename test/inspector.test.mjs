@@ -2768,4 +2768,36 @@ describe('Inspector value formatting', function () {
         expect(collectProperties(new Thing(), [])).to.deep.equal(['accessor', 'inherited', 'field']);
         expect(collectProperties(new Thing(), [Base.prototype], ['field'])).to.deep.equal(['accessor']);
     });
+
+    it('leaves out getters of deprecated and removed APIs, without reading them', function () {
+        const calls = [];
+        // stands in for the engine's Debug, whose notices a debug build keeps in the getters
+        const Debug = {
+            deprecated: message => calls.push(message),
+            removed: message => calls.push(message),
+            warnOnce: message => calls.push(message)
+        };
+        class Component {
+            get current() {
+                return 1;
+            }
+
+            get old() {
+                Debug.deprecated('Component#old is deprecated.');
+                return 2;
+            }
+
+            get gone() {
+                Debug.removed('Component#gone is removed.');
+                return 3;
+            }
+
+            get legacy() {
+                Debug.warnOnce('Component#legacy is only for legacy mode.');
+                return 4;
+            }
+        }
+        expect(collectProperties(new Component(), [])).to.deep.equal(['current', 'legacy']);
+        expect(calls).to.deep.equal([]);
+    });
 });
