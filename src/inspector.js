@@ -67,7 +67,6 @@ import { buildTextureModel, collectTextures, textureRows } from './texture-view.
  * Which parts of the physics world the Physics tab draws. Each option is a checkbox on the tab.
  *
  * @typedef {object} InspectorPhysicsDrawOptions
- * @ignore
  * @property {boolean} [wireframe] - Collision shapes, colored by activation state. Defaults to
  * true.
  * @property {boolean} [aabb] - Axis-aligned bounds of each body.
@@ -80,6 +79,7 @@ import { buildTextureModel, collectTextures, textureRows } from './texture-view.
  * @property {boolean} [depthTest] - Hide lines behind geometry.
  * @property {number} [range] - Only draw lines within this distance of the camera, in meters. Zero
  * draws everything.
+ * @ignore
  */
 
 // the Bullet debug flag behind each boolean option
@@ -373,6 +373,14 @@ class Inspector {
     _pathEl;
 
     /**
+     * What the view is doing while it is picked, flown or orbited.
+     *
+     * @type {HTMLElement}
+     * @private
+     */
+    _modeEl;
+
+    /**
      * @type {HierarchyView}
      * @private
      */
@@ -632,6 +640,18 @@ class Inspector {
      * @private
      */
     _chooseKind = 'fly';
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _pickBtn;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _flyBtn;
 
     /**
      * @type {HTMLButtonElement}
@@ -1090,6 +1110,10 @@ class Inspector {
         this._applyPhysicsSettings();
     }
 
+    /**
+     * @returns {boolean} Whether the physics world is drawn.
+     * @private
+     */
     get _physicsDraw() {
         return this._drawToggle.checked;
     }
@@ -1110,6 +1134,10 @@ class Inspector {
         this._applyPhysicsSettings();
     }
 
+    /**
+     * @returns {InspectorPhysicsDrawOptions} Which parts of the physics world are drawn.
+     * @private
+     */
     get _physicsDrawOptions() {
         /** @type {InspectorPhysicsDrawOptions} */
         const options = {};
