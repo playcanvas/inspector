@@ -1,10 +1,4 @@
 /**
- * Stylesheet for the entity inspector panel. Injected into the panel's shadow root, so nothing
- * here leaks into the page and nothing in the page leaks in.
- *
- * @type {string}
- */
-/**
  * One muted tone per nesting level, cycling, for the indent guides of the property view, so a
  * nested row can be read back to its parent.
  *
@@ -20,10 +14,97 @@ const INDENT_COLORS = ['#3f4a5f', '#4a4459', '#3f5450', '#55503f'];
  */
 const BRACKET_COLORS = ['#6a7fa8', '#8a76a8', '#62968a', '#a39564'];
 
+/**
+ * The line icons of the toolbar, as the contents of a 24x24 SVG drawn with a 2px round stroke, in
+ * the style of the icons of the examples browser.
+ *
+ * @type {Record<string, string>}
+ */
+const ICONS = {
+    pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
+    play: '<path d="M7 4.5v15l12-7.5z"/>',
+    step: '<path d="M5 4.5v15l10-7.5z"/><path d="M19 5v14"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+    pick: '<path d="M4.04 4.69a.5.5 0 0 1 .65-.65l16 6.5a.5.5 0 0 1-.06.95l-6.13 1.58a2 2 0 0 0-1.43 1.43l-1.58 6.13a.5.5 0 0 1-.95.06z"/>',
+    fly: '<path d="m16 13 5.22 3.48a.5.5 0 0 0 .78-.42V7.87a.5.5 0 0 0-.75-.43L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
+    popout: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+    dock: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/>',
+    close: '<path d="M18 6 6 18M6 6l12 12"/>'
+};
+
+/**
+ * A rule per icon, setting the mask the icon buttons draw in their text color.
+ *
+ * @type {string}
+ */
+const ICON_RULES = Object.entries(ICONS).map(([name, body]) => {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+    return `    .pci-i-${name} { --pci-icon: url("data:image/svg+xml,${encodeURIComponent(svg)}"); }`;
+}).join('\n');
+
+/**
+ * Stylesheet for the entity inspector panel. Injected into the panel's shadow root, so nothing
+ * here leaks into the page and nothing in the page leaks in. Its palette matches the examples
+ * browser.
+ *
+ * @type {string}
+ */
 const styles = /* css */ `
     :host {
         all: initial;
         display: block;
+        /* native controls (selects, checkboxes) in their dark form */
+        color-scheme: dark;
+
+        --pci-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --pci-mono: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+        --pci-bg: #182022;
+        --pci-bar: #13191b;
+        --pci-raised: #1f282a;
+        --pci-input: #121819;
+        --pci-hover: rgba(255, 255, 255, 0.06);
+        --pci-pressed: rgba(255, 255, 255, 0.1);
+        --pci-border: rgba(255, 255, 255, 0.07);
+        --pci-border-strong: rgba(255, 255, 255, 0.12);
+        --pci-text: #eef2f3;
+        --pci-text-body: #dbe2e4;
+        --pci-text-secondary: #b9c4c7;
+        --pci-text-label: #93a2a6;
+        --pci-text-muted: #7f8f93;
+        --pci-text-faint: #56656a;
+        --pci-accent: #ff6600;
+        --pci-accent-text: #ff8a3c;
+        --pci-accent-soft: rgba(255, 102, 0, 0.14);
+        --pci-accent-strong: rgba(255, 102, 0, 0.24);
+        --pci-selected: rgba(255, 102, 0, 0.16);
+        --pci-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+
+    ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+    }
+
+    ::-webkit-scrollbar-track,
+    ::-webkit-scrollbar-corner {
+        background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        border: 3px solid transparent;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.14) padding-box;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(255, 255, 255, 0.26);
+    }
+
+    @supports not selector(::-webkit-scrollbar) {
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+        }
     }
 
     * {
@@ -39,10 +120,10 @@ const styles = /* css */ `
         z-index: 100000;
         display: flex;
         flex-direction: column;
-        background: #1b1d21;
-        color: #d8dbe0;
-        font: 12px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-        border-left: 1px solid #33363d;
+        background: var(--pci-bg);
+        color: var(--pci-text-body);
+        font: 12px/1.45 var(--pci-font);
+        border-left: 1px solid var(--pci-border-strong);
         box-shadow: -6px 0 18px rgba(0, 0, 0, 0.35);
         user-select: none;
         -webkit-user-select: none;
@@ -52,7 +133,7 @@ const styles = /* css */ `
         right: auto;
         left: 0;
         border-left: none;
-        border-right: 1px solid #33363d;
+        border-right: 1px solid var(--pci-border-strong);
         box-shadow: 6px 0 18px rgba(0, 0, 0, 0.35);
     }
 
@@ -86,17 +167,18 @@ const styles = /* css */ `
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: 4px;
-        padding: 6px 8px;
-        background: #24272d;
-        border-bottom: 1px solid #33363d;
+        gap: 2px;
+        padding: 6px 6px 6px 12px;
+        background: var(--pci-bar);
+        border-bottom: 1px solid var(--pci-border);
         flex: 0 0 auto;
     }
 
     .pci-toolbar .pci-title {
+        font-size: 13px;
         font-weight: 600;
-        color: #f0f2f5;
-        margin-right: 4px;
+        color: var(--pci-text);
+        margin-right: 10px;
         white-space: nowrap;
     }
 
@@ -104,31 +186,78 @@ const styles = /* css */ `
         flex: 1 1 auto;
     }
 
-    .pci-btn {
-        font: inherit;
-        color: #d8dbe0;
-        background: #33363d;
-        border: 1px solid #44484f;
-        border-radius: 4px;
-        padding: 2px 8px;
-        cursor: pointer;
-        white-space: nowrap;
+    .pci-toolbar .pci-sep {
+        flex: 0 0 1px;
+        align-self: stretch;
+        margin: 6px 5px;
+        background: var(--pci-border-strong);
     }
 
-    .pci-btn:hover {
-        background: #3d4149;
+    .pci-btn {
+        font: inherit;
+        font-weight: 500;
+        color: var(--pci-text-secondary);
+        background: rgba(255, 255, 255, 0.07);
+        border: none;
+        border-radius: 6px;
+        padding: 3px 10px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background-color 100ms, color 100ms;
+    }
+
+    .pci-btn:not(:disabled):hover {
+        background: var(--pci-pressed);
+        color: var(--pci-text);
+    }
+
+    .pci-btn:focus-visible {
+        outline: 2px solid var(--pci-accent);
+        outline-offset: -2px;
     }
 
     .pci-btn:disabled {
-        opacity: 0.4;
+        opacity: 0.35;
         cursor: default;
     }
 
-    .pci-btn.pci-active {
-        background: #ff8a20;
-        border-color: #ff8a20;
-        color: #1b1d21;
+    .pci-btn.pci-active,
+    .pci-btn.pci-active:not(:disabled):hover {
+        background: var(--pci-accent-soft);
+        color: var(--pci-accent-text);
     }
+
+    .pci-btn.pci-active:not(:disabled):hover {
+        background: var(--pci-accent-strong);
+    }
+
+    .pci-icon-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border-radius: 8px;
+        background: transparent;
+    }
+
+    .pci-icon-btn::before {
+        content: "";
+        width: 17px;
+        height: 17px;
+        background-color: currentColor;
+        -webkit-mask: var(--pci-icon) center / contain no-repeat;
+        mask: var(--pci-icon) center / contain no-repeat;
+    }
+
+    .pci-icon-btn.pci-warn,
+    .pci-icon-btn.pci-warn:not(:disabled):hover {
+        background: rgba(241, 76, 76, 0.16);
+        color: #ff8f8f;
+    }
+
+${ICON_RULES}
 
     .pci-body {
         flex: 1 1 auto;
@@ -148,26 +277,32 @@ const styles = /* css */ `
         flex: 0 0 auto;
         display: flex;
         gap: 6px;
-        padding: 6px 8px;
-        border-bottom: 1px solid #2c2f36;
+        padding: 8px;
+        border-bottom: 1px solid var(--pci-border);
     }
 
     .pci-filter input {
         flex: 1 1 auto;
         min-width: 0;
         font: inherit;
-        color: #e8eaee;
-        background: #14161a;
-        border: 1px solid #33363d;
-        border-radius: 4px;
-        padding: 3px 6px;
+        color: var(--pci-text);
+        background: var(--pci-input);
+        border: 1px solid var(--pci-border-strong);
+        border-radius: 999px;
+        padding: 4px 12px;
         outline: none;
         user-select: text;
         -webkit-user-select: text;
+        transition: border-color 100ms, box-shadow 100ms;
+    }
+
+    .pci-filter input::placeholder {
+        color: var(--pci-text-muted);
     }
 
     .pci-filter input:focus {
-        border-color: #ff8a20;
+        border-color: var(--pci-accent);
+        box-shadow: 0 0 0 3px var(--pci-accent-soft);
     }
 
     .pci-tabs {
@@ -175,32 +310,35 @@ const styles = /* css */ `
         display: flex;
         flex-wrap: wrap;
         gap: 2px;
-        padding: 4px 8px 0;
-        background: #24272d;
-        border-bottom: 1px solid #33363d;
+        margin: 8px;
+        padding: 3px;
+        background: var(--pci-input);
+        border: 1px solid var(--pci-border);
+        border-radius: 9px;
     }
 
     .pci-tab {
         font: inherit;
-        color: #a3a8b1;
+        font-weight: 500;
+        color: var(--pci-text-muted);
         background: transparent;
-        border: 1px solid transparent;
-        border-bottom: none;
-        border-radius: 4px 4px 0 0;
-        padding: 3px 10px;
-        margin-bottom: -1px;
+        border: none;
+        border-radius: 6px;
+        padding: 3px 9px;
         white-space: nowrap;
         cursor: pointer;
+        transition: background-color 100ms, color 100ms;
     }
 
     .pci-tab:hover {
-        color: #e8eaee;
+        color: var(--pci-text);
+        background: var(--pci-hover);
     }
 
-    .pci-tab.pci-active {
-        color: #f0f2f5;
-        background: #1b1d21;
-        border-color: #33363d;
+    .pci-tab.pci-active,
+    .pci-tab.pci-active:hover {
+        color: var(--pci-text);
+        background: var(--pci-pressed);
     }
 
     .pci-listpanel {
@@ -217,8 +355,8 @@ const styles = /* css */ `
         align-items: center;
         gap: 4px 14px;
         padding: 4px 8px;
-        border-bottom: 1px solid #2c2f36;
-        color: #a3a8b1;
+        border-bottom: 1px solid var(--pci-border);
+        color: var(--pci-text-secondary);
         font-size: 11px;
     }
 
@@ -232,12 +370,12 @@ const styles = /* css */ `
         position: fixed;
         z-index: 2;
         max-width: 320px;
-        padding: 4px 7px;
-        background: #2c3038;
-        color: #e4e7ec;
-        border: 1px solid #454a54;
-        border-radius: 3px;
-        box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+        padding: 5px 8px;
+        background: var(--pci-raised);
+        color: var(--pci-text);
+        border: 1px solid var(--pci-border-strong);
+        border-radius: 6px;
+        box-shadow: var(--pci-shadow);
         white-space: pre-line;
         overflow-wrap: anywhere;
         pointer-events: none;
@@ -255,10 +393,10 @@ const styles = /* css */ `
         width: 54px;
         height: auto;
         font: inherit;
-        color: #e8eaee;
-        background: #14161a;
-        border: 1px solid #33363d;
-        border-radius: 3px;
+        color: var(--pci-text);
+        background: var(--pci-input);
+        border: 1px solid var(--pci-border-strong);
+        border-radius: 5px;
         padding: 1px 4px;
         outline: none;
         user-select: text;
@@ -266,44 +404,44 @@ const styles = /* css */ `
     }
 
     .pci-number:focus {
-        border-color: #ff8a20;
+        border-color: var(--pci-accent);
     }
 
     .pci-note {
         flex: 0 0 auto;
         padding: 6px 8px;
-        border-bottom: 1px solid #2c2f36;
+        border-bottom: 1px solid var(--pci-border);
         color: #ffb4b4;
         font-size: 11px;
     }
 
     .pci-note.pci-note-info {
-        color: #9aa0aa;
+        color: var(--pci-text-label);
     }
 
     .pci-select {
         font: inherit;
-        color: #e8eaee;
-        background: #14161a;
-        border: 1px solid #33363d;
-        border-radius: 3px;
-        padding: 1px 4px;
+        color: var(--pci-text);
+        background: var(--pci-input);
+        border: 1px solid var(--pci-border-strong);
+        border-radius: 5px;
+        padding: 2px 6px;
         outline: none;
     }
 
     .pci-select:focus {
-        border-color: #ff8a20;
+        border-color: var(--pci-accent);
     }
 
     .pci-check input {
         width: 12px;
         height: 12px;
         margin: 0;
-        accent-color: #ff8a20;
+        accent-color: var(--pci-accent);
     }
 
     .pci-check.pci-strong {
-        color: #f0f2f5;
+        color: var(--pci-text);
         font-weight: 600;
     }
 
@@ -312,12 +450,12 @@ const styles = /* css */ `
     }
 
     .pci-subbar .pci-hint {
-        color: #6b7079;
+        color: var(--pci-text-muted);
     }
 
     .pci-subbar.pci-options {
         margin-left: 12px;
-        border-left: 2px solid #3a3e46;
+        border-left: 2px solid var(--pci-border-strong);
     }
 
     .pci-subbar.pci-inactive {
@@ -329,7 +467,7 @@ const styles = /* css */ `
         width: 12px;
         height: 12px;
         margin: 0;
-        accent-color: #ff8a20;
+        accent-color: var(--pci-accent);
         cursor: pointer;
     }
 
@@ -358,11 +496,11 @@ const styles = /* css */ `
     }
 
     .pci-lrow:hover {
-        background-color: #262a31;
+        background-color: var(--pci-hover);
     }
 
     .pci-lrow.pci-selected {
-        background-color: #3a4a6b;
+        background-color: var(--pci-selected);
         color: #ffffff;
     }
 
@@ -381,8 +519,8 @@ const styles = /* css */ `
     .pci-cell-index {
         flex: 0 0 22px;
         text-align: right;
-        color: #6b7079;
-        font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+        color: var(--pci-text-muted);
+        font-family: var(--pci-mono);
         font-size: 10.5px;
     }
 
@@ -393,13 +531,13 @@ const styles = /* css */ `
     }
 
     .pci-cell-info {
-        color: #9aa0aa;
-        font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+        color: var(--pci-text-label);
+        font-family: var(--pci-mono);
         font-size: 10.5px;
     }
 
     .pci-lrow.pci-selected .pci-cell-info {
-        color: #d0d6e0;
+        color: var(--pci-text-secondary);
     }
 
     .pci-cell-right {
@@ -411,7 +549,7 @@ const styles = /* css */ `
         flex-shrink: 0;
         margin-left: auto;
         color: #b5cea8;
-        font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+        font-family: var(--pci-mono);
         font-size: 10.5px;
     }
 
@@ -420,14 +558,14 @@ const styles = /* css */ `
         font-size: 9.5px;
         line-height: 13px;
         padding: 0 4px;
-        border-radius: 3px;
+        border-radius: 4px;
         background: #5a2a2a;
         color: #ffb4b4;
     }
 
     .pci-cell-tag-info {
-        background: #2f333b;
-        color: #a3a8b1;
+        background: rgba(255, 255, 255, 0.07);
+        color: var(--pci-text-secondary);
     }
 
     .pci-cell.pci-link {
@@ -455,11 +593,11 @@ const styles = /* css */ `
     }
 
     .pci-row:hover {
-        background: #262a31;
+        background: var(--pci-hover);
     }
 
     .pci-row.pci-selected {
-        background: #3a4a6b;
+        background: var(--pci-selected);
         color: #ffffff;
     }
 
@@ -469,7 +607,7 @@ const styles = /* css */ `
 
     .pci-row.pci-graphnode .pci-name {
         font-style: italic;
-        color: #a3a8b1;
+        color: var(--pci-text-secondary);
     }
 
     .pci-row.pci-match .pci-name {
@@ -480,7 +618,7 @@ const styles = /* css */ `
         flex: 0 0 12px;
         width: 12px;
         text-align: center;
-        color: #8b909a;
+        color: var(--pci-text-muted);
         font-size: 11px;
     }
 
@@ -489,7 +627,7 @@ const styles = /* css */ `
         width: 12px;
         height: 12px;
         margin: 0 3px 0 0;
-        accent-color: #ff8a20;
+        accent-color: var(--pci-accent);
         cursor: pointer;
     }
 
@@ -508,21 +646,21 @@ const styles = /* css */ `
         font-size: 9.5px;
         line-height: 13px;
         padding: 0 4px;
-        border-radius: 3px;
-        background: #2f333b;
-        color: #a3a8b1;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.07);
+        color: var(--pci-text-secondary);
     }
 
     .pci-selected .pci-badge {
-        background: #4d5f86;
-        color: #e8eaee;
+        background: var(--pci-accent-strong);
+        color: var(--pci-text);
     }
 
     .pci-count {
         margin-left: auto;
         min-width: 4ch;
         text-align: right;
-        color: #6b7079;
+        color: var(--pci-text-muted);
         font-size: 10.5px;
         font-variant-numeric: tabular-nums;
     }
@@ -531,14 +669,14 @@ const styles = /* css */ `
     .pci-count.pci-count-total {
         margin-left: 6px;
         min-width: 6ch;
-        color: #4f535b;
+        color: var(--pci-text-faint);
     }
 
     .pci-splitter {
         flex: 0 0 5px;
-        background: #24272d;
-        border-top: 1px solid #33363d;
-        border-bottom: 1px solid #33363d;
+        background: var(--pci-raised);
+        border-top: 1px solid var(--pci-border-strong);
+        border-bottom: 1px solid var(--pci-border-strong);
         cursor: ns-resize;
     }
 
@@ -546,14 +684,14 @@ const styles = /* css */ `
         flex: 1 1 auto;
         overflow: auto;
         padding-bottom: 8px;
-        font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+        font-family: var(--pci-mono);
         font-size: 11px;
     }
 
     .pci-empty {
         padding: 12px 10px;
-        color: #6b7079;
-        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: var(--pci-text-muted);
+        font-family: var(--pci-font);
         font-size: 12px;
     }
 
@@ -565,9 +703,9 @@ const styles = /* css */ `
         gap: 6px;
         padding: 4px 8px;
         margin-top: 4px;
-        background: #24272d;
-        color: #f0f2f5;
-        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        background: var(--pci-raised);
+        color: var(--pci-text);
+        font-family: var(--pci-font);
         font-size: 11.5px;
         font-weight: 600;
         cursor: pointer;
@@ -576,7 +714,7 @@ const styles = /* css */ `
 
     .pci-section-title::before {
         content: "▾";
-        color: #8b909a;
+        color: var(--pci-text-muted);
         font-size: 10px;
     }
 
@@ -596,19 +734,19 @@ const styles = /* css */ `
     }
 
     .pci-prop:hover {
-        background-color: #20232a;
+        background-color: var(--pci-hover);
     }
 
     /* an entry of an expanded collection, and everything it opens, reads as one block */
     .pci-prop.pci-group {
-        border-top: 1px solid #343842;
+        border-top: 1px solid var(--pci-border-strong);
         margin-top: 2px;
         padding-top: 2px;
     }
 
     /* the last row a collection's final entry opened, closing the block */
     .pci-prop.pci-group-end {
-        border-bottom: 1px solid #343842;
+        border-bottom: 1px solid var(--pci-border-strong);
         margin-bottom: 2px;
         padding-bottom: 2px;
     }
@@ -616,7 +754,7 @@ const styles = /* css */ `
 
     .pci-label {
         flex: 0 0 38%;
-        color: #9aa0aa;
+        color: var(--pci-text-label);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -629,7 +767,7 @@ const styles = /* css */ `
     .pci-value {
         flex: 1 1 auto;
         min-width: 0;
-        color: #e0e3e8;
+        color: var(--pci-text-body);
         white-space: pre-wrap;
         word-break: break-word;
         user-select: text;
@@ -639,7 +777,7 @@ const styles = /* css */ `
     .pci-v-num  { color: #b5cea8; }
     .pci-v-bool { color: #569cd6; }
     .pci-v-str  { color: #ce9178; }
-    .pci-v-null { color: #6b7079; }
+    .pci-v-null { color: var(--pci-text-muted); }
     .pci-v-obj  { color: #dcdcaa; }
     .pci-v-ref  { color: #4fc1ff; }
     .pci-v-err  { color: #f14c4c; }
@@ -662,7 +800,7 @@ const styles = /* css */ `
     }
 
     .pci-prop.pci-active {
-        background-color: #3a4a6b;
+        background-color: var(--pci-selected);
     }
 
     .pci-prop.pci-active .pci-value {
@@ -690,16 +828,16 @@ const styles = /* css */ `
         font-size: 10px;
         line-height: 14px;
         padding: 0 6px;
-        color: #a3a8b1;
-        background: #2f333b;
+        color: var(--pci-text-secondary);
+        background: rgba(255, 255, 255, 0.07);
         border: none;
-        border-radius: 3px;
+        border-radius: 4px;
         cursor: pointer;
     }
 
     .pci-copy:hover, .pci-action:not(:disabled):hover {
         color: #ffffff;
-        background: #3a4a6b;
+        background: var(--pci-selected);
     }
 
     .pci-code {
@@ -708,10 +846,10 @@ const styles = /* css */ `
         padding: 6px 0;
         max-height: 360px;
         overflow: auto;
-        background: #16181d;
-        border: 1px solid #2c2f36;
-        border-radius: 3px;
-        font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+        background: var(--pci-input);
+        border: 1px solid var(--pci-border);
+        border-radius: 6px;
+        font-family: var(--pci-mono);
         font-size: 10.5px;
         line-height: 15px;
         color: #d4d4d4;
@@ -735,8 +873,8 @@ const styles = /* css */ `
         margin-right: 10px;
         padding-right: 6px;
         text-align: right;
-        color: #5c626c;
-        border-right: 1px solid #2c2f36;
+        color: var(--pci-text-faint);
+        border-right: 1px solid var(--pci-border);
         user-select: none;
         -webkit-user-select: none;
     }
@@ -756,16 +894,16 @@ const styles = /* css */ `
         display: flex;
         gap: 10px;
         padding: 4px 8px;
-        background: #24272d;
-        border-top: 1px solid #33363d;
-        color: #8b909a;
+        background: var(--pci-raised);
+        border-top: 1px solid var(--pci-border-strong);
+        color: var(--pci-text-muted);
         font-size: 11px;
         white-space: nowrap;
         overflow: hidden;
     }
 
     .pci-status .pci-paused {
-        color: #ff8a20;
+        color: var(--pci-accent);
         font-weight: 600;
     }
 

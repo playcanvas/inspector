@@ -133,6 +133,28 @@ function el(tag, className, text) {
 }
 
 /**
+ * A toolbar button showing one of the icons of the stylesheet. The label names it for screen
+ * readers, as the tooltip only shows on hover.
+ *
+ * @param {string} icon - The icon name, one of `ICONS` in the stylesheet.
+ * @param {string} label - The accessible name of the button.
+ * @returns {HTMLButtonElement} The button.
+ */
+function iconButton(icon, label) {
+    const button = /** @type {HTMLButtonElement} */ (el('button', `pci-btn pci-icon-btn pci-i-${icon}`));
+    button.setAttribute('aria-label', label);
+    return button;
+}
+
+/**
+ * @param {HTMLButtonElement} button - A button made by `iconButton`.
+ * @param {string} icon - The icon to show instead.
+ */
+function setIcon(button, icon) {
+    button.className = button.className.replace(/\bpci-i-\S+/, `pci-i-${icon}`);
+}
+
+/**
  * @param {Event} e - A keyboard event.
  * @returns {boolean} Whether the key went to a text field.
  */
@@ -1122,15 +1144,16 @@ class Inspector {
         const popup = window.open('', 'pc-inspector', `popup=yes,width=${this._width},height=${height}`);
         if (!popup) {
             // blocked by the browser: say so on the button rather than silently doing nothing
-            this._popBtn.textContent = 'Blocked';
-            setTimeout(() => this._applyLayout(), 1500);
+            this._popBtn.classList.add('pci-warn');
+            setTip(this._popBtn, 'The browser blocked the window. Allow pop-ups for this page to pop the panel out');
+            setTimeout(() => this._applyLayout(), 4000);
             return;
         }
 
         const doc = popup.document;
         doc.title = 'Inspector';
         doc.documentElement.style.height = '100%';
-        doc.body.style.cssText = 'margin: 0; height: 100%; background: #1b1d21; overflow: hidden;';
+        doc.body.style.cssText = 'margin: 0; height: 100%; background: #182022; overflow: hidden;';
         doc.body.appendChild(doc.adoptNode(this._host));
 
         popup.addEventListener('pagehide', this._onPopupHide);
@@ -1270,19 +1293,26 @@ class Inspector {
         // toolbar
         const toolbar = el('div', 'pci-toolbar');
         const title = el('span', 'pci-title', 'Inspector');
-        this._pauseBtn = /** @type {HTMLButtonElement} */ (el('button', 'pci-btn', 'Pause'));
-        this._stepBtn = /** @type {HTMLButtonElement} */ (el('button', 'pci-btn', 'Step'));
-        const refreshBtn = el('button', 'pci-btn', 'Refresh');
-        this._pickBtn = /** @type {HTMLButtonElement} */ (el('button', 'pci-btn', 'Pick'));
-        this._flyBtn = /** @type {HTMLButtonElement} */ (el('button', 'pci-btn', 'Fly'));
+        this._pauseBtn = iconButton('pause', 'Pause');
+        this._stepBtn = iconButton('step', 'Step');
+        const refreshBtn = iconButton('refresh', 'Refresh');
+        this._pickBtn = iconButton('pick', 'Pick');
+        this._flyBtn = iconButton('fly', 'Fly');
         setTip(this._pickBtn, 'Pick an entity in the view: hover to see it outlined, click to select it. Esc stops');
         setTip(this._flyBtn, 'Fly the camera of the view with the mouse and WASD, without moving the app\'s own camera. Esc stops');
-        this._popBtn = /** @type {HTMLButtonElement} */ (el('button', 'pci-btn', 'Pop out'));
-        const closeBtn = el('button', 'pci-btn', '✕');
+        this._popBtn = iconButton('popout', 'Pop out');
+        const closeBtn = iconButton('close', 'Hide');
         const toggleLabel = Inspector._keyLabel(this._toggleKey);
         setTip(closeBtn, `Hide the panel${toggleLabel ? `. Press ${toggleLabel} to show it again` : ''}`);
         setTip(refreshBtn, 'Rebuild the list and the properties now, instead of at the next refresh');
-        toolbar.append(title, this._pauseBtn, this._stepBtn, refreshBtn, this._pickBtn, this._flyBtn, el('span', 'pci-spacer'), this._popBtn, closeBtn);
+        toolbar.append(
+            title,
+            this._pauseBtn, this._stepBtn, el('span', 'pci-sep'),
+            this._pickBtn, this._flyBtn, el('span', 'pci-sep'),
+            refreshBtn,
+            el('span', 'pci-spacer'),
+            this._popBtn, closeBtn
+        );
 
         this._pauseBtn.addEventListener('click', () => {
             this.paused = !this._paused;
@@ -2681,7 +2711,9 @@ class Inspector {
         this._panel.classList.toggle('pci-dock-left', !popped && this._dock === 'left');
         this._panel.style.width = popped ? '' : `${this._width}px`;
         this._panel.style.top = popped ? '' : `${this._top}px`;
-        this._popBtn.textContent = popped ? 'Dock' : 'Pop out';
+        setIcon(this._popBtn, popped ? 'dock' : 'popout');
+        this._popBtn.setAttribute('aria-label', popped ? 'Dock' : 'Pop out');
+        this._popBtn.classList.remove('pci-warn');
         setTip(this._popBtn, popped ? 'Bring the panel back into the page' : 'Move the panel to a window of its own');
     }
 
@@ -2712,11 +2744,13 @@ class Inspector {
     _applyPauseState() {
         if (!this._pauseBtn) return;
         const paused = this._paused;
-        this._pauseBtn.textContent = `${paused ? 'Resume' : 'Pause'}${Inspector._keyHint(this._pauseKey)}`;
-        setTip(this._pauseBtn, paused ? 'Resume the app' : 'Pause the app: rendering continues, time stands still');
+        setIcon(this._pauseBtn, paused ? 'play' : 'pause');
+        this._pauseBtn.setAttribute('aria-label', paused ? 'Resume' : 'Pause');
+        setTip(this._pauseBtn, paused ?
+            `Resume the app${Inspector._keyHint(this._pauseKey)}` :
+            `Pause the app${Inspector._keyHint(this._pauseKey)}: rendering continues, time stands still`);
         this._pauseBtn.classList.toggle('pci-active', paused);
-        this._stepBtn.textContent = `Step${Inspector._keyHint(this._stepKey)}`;
-        setTip(this._stepBtn, 'Advance one frame while paused');
+        setTip(this._stepBtn, `Advance one frame while paused${Inspector._keyHint(this._stepKey)}`);
         this._stepBtn.disabled = !paused;
         this._pausedEl.textContent = paused ? 'PAUSED' : '';
     }
