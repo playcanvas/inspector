@@ -16,7 +16,10 @@ previews of textures and render targets, picking and flying in the view, and a d
 that steps through the draw calls of a render pass.
 
 The inspector is read-only, apart from toggling entities on and off, pausing and stepping the app,
-and view-only overrides (render modes, wireframe, a flown camera) it removes when it closes.
+and view-only overrides (render modes, wireframe, a flown or orbited camera) it removes when it
+closes.
+
+![The inspector docked beside a running app, with an entity selected in the hierarchy](docs/images/inspector.png)
 
 ## Install
 
@@ -50,6 +53,15 @@ entity.addComponent('script');
 entity.script.create(EntityInspector, { properties: { dock: 'left' } });
 app.root.addChild(entity);
 ```
+
+### Step through a frame
+
+In the Frame graph tab, select a forward pass or one of its layer steps and turn on **Debug frame**.
+The app pauses and the pass draws only up to the selected draw; the arrow keys step through the
+draws one at a time, with each one outlined in the view and listed with its mesh and material. It
+needs the debug build of the engine.
+
+![Stepping through the draws of a layer one at a time](docs/images/debug-frame.webp)
 
 ## Engine versions
 
