@@ -92,30 +92,6 @@ A few engine helpers the inspector draws with are copied into `src/renderers`, `
 `src/input`, so the inspector does not depend on them being in the app's engine build. See
 [COPIED_FROM.md](COPIED_FROM.md).
 
-## Releasing
-
-Releases are published to npm from GitHub Actions when a version tag is pushed. Only repository
-admins and maintainers can push tags.
-
-1. Update your `main` to the commit to release, with CI green.
-2. Bump the version and tag it. The script shows the next version and asks before tagging. It
-   resets the working tree, so commit or stash any changes first:
-
-   ```sh
-   ./release.sh minor # or major, or patch
-   ```
-
-3. Push the commit and the tag:
-
-   ```sh
-   git push --follow-tags
-   ```
-
-The **Publish** workflow runs the lint and tests, publishes to npm with provenance, and creates a
-GitHub release with generated notes.
-
-A tag that does not match the `package.json` version fails the run without publishing.
-
 ## License
 
 MIT
