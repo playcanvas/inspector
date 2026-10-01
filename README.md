@@ -55,7 +55,8 @@ app.root.addChild(entity);
 
 Each inspector release names the engine versions it supports in its `playcanvas` peer dependency.
 The inspector reads engine internals to show what it shows, so a new engine release can need a new
-inspector release.
+inspector release. The range takes later 2.x releases but not prereleases of them, such as
+`2.24.0-beta.1`, as npm does not match prereleases of other versions than the range names.
 
 ## The devtools hook
 

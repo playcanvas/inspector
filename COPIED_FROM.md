@@ -4,8 +4,8 @@ The inspector draws with a few engine helpers that are not part of every app's e
 the browser extension cannot rely on the page's engine carrying them. They are copied here and
 import engine classes from `playcanvas`, so they work on the app's own engine.
 
-Copied from [playcanvas/engine](https://github.com/playcanvas/engine) `v2.23.0-beta.24`
-(`55ce8a4a6`).
+Copied from [playcanvas/engine](https://github.com/playcanvas/engine) `v2.23.0`
+(`6542866f8`).
 
 | file here | engine source |
 |---|---|
