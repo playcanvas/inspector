@@ -18,6 +18,8 @@ npm install @playcanvas/inspector
 It requires PlayCanvas Engine 2.23 or newer. `playcanvas` is a peer dependency: the inspector works
 on your app's own engine, so it must be the same `playcanvas` package your app imports.
 
+TypeScript declarations are included, generated from the JSDoc of the sources.
+
 ## Use
 
 ```javascript
@@ -69,6 +71,8 @@ Node 22.19 or newer.
 npm install
 npm run lint
 npm test
+npm run build:types # writes the TypeScript declarations to types/
+npm run test:types  # compiles a TypeScript usage of the package against them
 ```
 
 The tests run against the `playcanvas` version in `devDependencies`, on the engine's null graphics

@@ -153,7 +153,9 @@ class WireRenderer {
     constructor(app) {
         Debug.assert(app, 'WireRenderer requires an application.');
         this.app = app;
+        /** @private */
         this._scene = app.scene;
+        /** @private */
         this._immediate = app.scene.immediate;
 
         /**

@@ -25,6 +25,8 @@ Local changes, kept to a minimum so a re-sync is a copy and a diff:
 - Engine imports are merged into one `import { … } from 'playcanvas'`.
 - `Debug` and `DebugGraphics` come from `src/debug.js`, as the engine does not export them.
   Assertions and GPU markers are dropped, as a release engine build drops them.
+- In `wire-renderer.js`, `_scene` and `_immediate` are marked `@private`. Unmarked, the generated
+  declarations would publish their types, and through them the engine's unexported `LineWriter`.
 
-On each engine release: copy the files again, reapply the two changes above, run the tests, and
+On each engine release: copy the files again, reapply the changes above, run the tests, and
 update the version and commit at the top of this file.
