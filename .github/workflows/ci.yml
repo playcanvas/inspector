@@ -69,3 +69,6 @@ jobs:
 
             - name: Test Types
               run: npm run test:types
+
+            - name: Run Publint
+              run: npm run publint

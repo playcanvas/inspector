@@ -48,6 +48,9 @@ jobs:
             - name: Test Types
               run: npm run test:types
 
+            - name: Run Publint
+              run: npm run publint
+
             - name: Publish to npm
               run: npm publish --provenance --access public
 
