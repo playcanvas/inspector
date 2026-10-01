@@ -170,7 +170,7 @@ function isTextTarget(e) {
 }
 
 /**
- * An in-page inspector for a running application. It docks a panel over the canvas with four
+ * An in-page inspector for a running application. It docks a panel over the canvas with twelve
  * tabs above a live property view of whatever is selected:
  *
  * - Hierarchy: the entity tree. The property view shows the node's transform, every component it
@@ -179,9 +179,12 @@ function isTextTarget(e) {
  * - Cameras: every camera in render order, with its target, viewport, layers and render mode. The
  *   render mode of a camera can be switched to a debug view of the material inputs, the whole scene
  *   drawn in wireframe, and any camera flown.
+ * - Assets: every asset in the registry with its file, load state and the components using it.
+ *   Asset references on a component link here, and a texture names the asset it came from.
  * - Frame graph: the render passes of the last frame in execution order, as the render pass trace
  *   prints them, with the layer steps of forward passes, the light of shadow passes and optional
- *   GPU timings. Render target cells link to the next tab.
+ *   GPU timings. Render target cells link to the next tab. With the debug engine, the debug frame
+ *   draws a forward pass only up to a chosen draw, stepped one draw at a time with the arrow keys.
  * - Render targets: every render target on the device including the backbuffer, with its
  *   attachments and the passes that rendered into it this frame, linking back to the frame graph.
  *   The selected target's attachment can be previewed live in a corner of the viewport.
@@ -200,16 +203,16 @@ function isTextTarget(e) {
  *   after the mesh, material or asset it was found to belong to. Buffer values elsewhere link here.
  * - Shaders: every shader on the device with its language, state and vertex attributes. The
  *   compiled variants listed on a material link here.
- * - Assets: every asset in the registry with its file, load state and the components using it.
- *   Asset references on a component link here, and a texture names the asset it came from.
  * - Physics: the rigid bodies and joints of the scene, with the physics world drawn over the scene
  *   through the engine's debug drawer when Ammo is loaded.
  *
  * The app can be paused and stepped a frame at a time, and the panel can be popped out into its own
- * window to leave the canvas unobscured.
+ * window to leave the canvas unobscured. In the view, an entity can be picked to select it, and the
+ * camera flown, or orbited around the selected entity, without moving the app's own camera.
  *
- * The view is read-only, with one exception: the checkbox on each hierarchy row flips the node's
- * enabled flag.
+ * The inspector is read-only, apart from the checkbox on each hierarchy row, which flips the node's
+ * enabled flag, pausing and stepping the app, and view-only overrides: render modes, wireframe and
+ * a flown or orbited camera, which it removes when it closes.
  *
  * ```javascript
  * const inspector = new Inspector(app, { dock: 'left' });
