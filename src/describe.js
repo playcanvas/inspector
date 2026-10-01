@@ -253,10 +253,39 @@ function describeValue(value, depth = 0) {
     };
 }
 
+// a call of the engine's deprecation and removal notices, which a debug build keeps in the source
+const DEPRECATION_CALL = /\bDebug\.(?:deprecated|removed)\(/;
+
+/**
+ * Whether a getter of each accessor is a deprecated or removed API, keyed by the getter.
+ *
+ * @type {WeakMap<Function, boolean>}
+ */
+const deprecatedGetters = new WeakMap();
+
+/**
+ * Whether a getter is a deprecated or removed engine API, which warns when read. Told from its
+ * source, so the getter is never called: reading it would print the notice, which is meant for the
+ * app's developer. Release builds strip the notices, and with them the warnings, so there such a
+ * getter is listed like any other.
+ *
+ * @param {Function} getter - The getter.
+ * @returns {boolean} Whether it is deprecated or removed.
+ */
+function isDeprecatedGetter(getter) {
+    let deprecated = deprecatedGetters.get(getter);
+    if (deprecated === undefined) {
+        deprecated = DEPRECATION_CALL.test(Function.prototype.toString.call(getter));
+        deprecatedGetters.set(getter, deprecated);
+    }
+    return deprecated;
+}
+
 /**
  * Lists the public properties of an object: accessors with a getter found on its prototype chain
  * (most derived class first, in declaration order), followed by its own enumerable data fields.
- * Names starting with an underscore, methods and anything in `skip` are left out.
+ * Names starting with an underscore, methods, getters of deprecated or removed engine APIs and
+ * anything in `skip` are left out.
  *
  * @param {object} obj - The object to reflect on.
  * @param {object[]} stopPrototypes - Prototypes at which to stop walking the chain. These and
@@ -275,6 +304,7 @@ function collectProperties(obj, stopPrototypes, skip = []) {
             const descriptor = Object.getOwnPropertyDescriptor(proto, name);
             if (!descriptor?.get) continue;
             seen.add(name);
+            if (isDeprecatedGetter(descriptor.get)) continue;
             names.push(name);
         }
     }
