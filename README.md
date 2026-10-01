@@ -45,8 +45,8 @@ app.root.addChild(entity);
 ## Engine versions
 
 Each inspector release names the engine versions it supports in its `playcanvas` peer dependency.
-The inspector reads engine internals to show what it shows, so it is tied to engine releases
-rather than claiming a wide version range.
+The inspector reads engine internals to show what it shows, so a new engine release can need a new
+inspector release.
 
 ## The devtools hook
 
@@ -73,6 +73,7 @@ npm run lint
 npm test
 npm run build:types # writes the TypeScript declarations to types/
 npm run test:types  # compiles a TypeScript usage of the package against them
+npm run publint     # checks the package is publishable
 ```
 
 The tests run against the `playcanvas` version in `devDependencies`, on the engine's null graphics
@@ -88,10 +89,11 @@ Releases are published to npm from GitHub Actions when a version tag is pushed. 
 admins and maintainers can push tags.
 
 1. Update your `main` to the commit to release, with CI green.
-2. Bump the version and tag it:
+2. Bump the version and tag it. The script shows the next version and asks before tagging. It
+   resets the working tree, so commit or stash any changes first:
 
    ```sh
-   npm version minor # or major, or patch
+   ./release.sh minor # or major, or patch
    ```
 
 3. Push the commit and the tag:
