@@ -27,7 +27,7 @@ import { buildRenderTargetModel, formatChannels, isDepthFormat, previewAttachmen
 import { buildShaderModel, collectShaders, shaderRows, stateName } from './shader-view.js';
 import { styles } from './styles.js';
 import { installTooltip, setTip } from './tooltip.js';
-import { CameraFly, CanvasCapture, RENDER_MODES, ViewportPicker, WireframeMode, isScreenCamera, screenCameraAt } from './viewport-tools.js';
+import { CameraFly, CameraOrbit, CanvasCapture, RENDER_MODES, ViewportPicker, WireframeMode, isScreenCamera, screenCameraAt } from './viewport-tools.js';
 import { buildTextureModel, collectTextures, textureRows } from './texture-view.js';
 
 /** @import { AppBase } from 'playcanvas' */
@@ -618,10 +618,26 @@ class Inspector {
     _hovered = null;
 
     /**
-     * @type {CameraFly|null}
+     * The camera driven by Fly or Orbit, while one is.
+     *
+     * @type {CameraFly|CameraOrbit|null}
      * @private
      */
     _fly = null;
+
+    /**
+     * Which of Fly and Orbit waits for the view of a camera to be clicked, while one does.
+     *
+     * @type {'fly'|'orbit'}
+     * @private
+     */
+    _chooseKind = 'fly';
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _orbitBtn;
 
     /** @private */
     _hoverColor = new Color(0.35, 0.8, 1);
@@ -1298,8 +1314,11 @@ class Inspector {
         const refreshBtn = iconButton('refresh', 'Refresh');
         this._pickBtn = iconButton('pick', 'Pick');
         this._flyBtn = iconButton('fly', 'Fly');
+        this._orbitBtn = iconButton('orbit', 'Orbit');
+        this._orbitBtn.disabled = true;
         setTip(this._pickBtn, 'Pick an entity in the view: hover to see it outlined, click to select it. Esc stops');
         setTip(this._flyBtn, 'Fly the camera of the view with the mouse and WASD, without moving the app\'s own camera. Esc stops');
+        setTip(this._orbitBtn, 'Orbit the camera of the view around the selected entity: drag to orbit, right-drag to pan, the wheel to zoom, without moving the app\'s own camera. Esc stops');
         this._popBtn = iconButton('popout', 'Pop out');
         const closeBtn = iconButton('close', 'Hide');
         const toggleLabel = Inspector._keyLabel(this._toggleKey);
@@ -1308,7 +1327,7 @@ class Inspector {
         toolbar.append(
             title,
             this._pauseBtn, this._stepBtn, el('span', 'pci-sep'),
-            this._pickBtn, this._flyBtn, el('span', 'pci-sep'),
+            this._pickBtn, this._flyBtn, this._orbitBtn, el('span', 'pci-sep'),
             refreshBtn,
             el('span', 'pci-spacer'),
             this._popBtn, closeBtn
@@ -1319,10 +1338,8 @@ class Inspector {
         });
         this._stepBtn.addEventListener('click', () => this.step());
         this._pickBtn.addEventListener('click', () => this._setPicking(this._canvasMode !== 'pick'));
-        this._flyBtn.addEventListener('click', () => {
-            if (this._fly || this._canvasMode === 'choose') this._stopFly();
-            else this._startFly(null);
-        });
+        this._flyBtn.addEventListener('click', () => this._toggleDrive('fly'));
+        this._orbitBtn.addEventListener('click', () => this._toggleDrive('orbit'));
         refreshBtn.addEventListener('click', () => this._refresh());
         this._popBtn.addEventListener('click', () => {
             if (this._popup) this._dockBack();
@@ -1619,6 +1636,8 @@ class Inspector {
         this._hierarchy = new HierarchyView(tree, (node) => {
             this._selected = node;
             if (this._tab === 'hierarchy') this._properties.setSubject(node, buildNodeModel);
+            if (node && this._fly instanceof CameraOrbit) this._fly.setTarget(node);
+            this._applyOrbitState();
             this._updateStatus();
         });
         this._hierarchy.isLocked = node => this._isLocked(node);
@@ -2927,6 +2946,27 @@ class Inspector {
     }
 
     /**
+     * Starts Fly or Orbit from its button, or stops it when it is on.
+     *
+     * @param {'fly'|'orbit'} kind - Which.
+     * @private
+     */
+    _toggleDrive(kind) {
+        const on = this._canvasMode === 'choose' ? this._chooseKind === kind : this._driveKind() === kind;
+        this._stopFly();
+        if (!on) this._startDrive(kind, null);
+    }
+
+    /**
+     * @returns {'fly'|'orbit'|null} Which of Fly and Orbit drives the camera, if either does.
+     * @private
+     */
+    _driveKind() {
+        if (this._fly instanceof CameraOrbit) return 'orbit';
+        return this._fly ? 'fly' : null;
+    }
+
+    /**
      * Flies a camera, or with no camera given, the one camera drawing to the screen, or the one
      * clicked next when several do.
      *
@@ -2934,29 +2974,49 @@ class Inspector {
      * @private
      */
     _startFly(camera) {
+        this._startDrive('fly', camera);
+    }
+
+    /**
+     * Flies a camera, or orbits it around the selected node. With no camera given, drives the one
+     * camera drawing to the screen, or the one clicked next when several do.
+     *
+     * @param {'fly'|'orbit'} kind - Whether to fly or to orbit.
+     * @param {CameraComponent|null} camera - The camera to drive, or null to find it from the view.
+     * @private
+     */
+    _startDrive(kind, camera) {
         this._stopFly();
         this._setPicking(false);
+        const target = this._selected;
+        if (kind === 'orbit' && !target) return;
+        const button = kind === 'orbit' ? this._orbitBtn : this._flyBtn;
         if (!camera) {
             const screen = collectCameras(this._app).filter(isScreenCamera);
             if (screen.length > 1) {
+                this._chooseKind = kind;
                 this._takeCanvas('choose', (e) => {
                     if (e.type !== 'pointerup') return;
                     const pointer = /** @type {PointerEvent} */ (e);
                     const bounds = /** @type {HTMLCanvasElement} */ (this._app.graphicsDevice.canvas).getBoundingClientRect();
                     const chosen = screenCameraAt(this._app, (pointer.clientX - bounds.left) / bounds.width, (pointer.clientY - bounds.top) / bounds.height);
-                    if (chosen) this._startFly(chosen);
+                    if (chosen) this._startDrive(kind, chosen);
                 });
-                this._flyBtn.classList.add('pci-active');
+                button.classList.add('pci-active');
                 return;
             }
             camera = screen[0] ?? null;
             if (!camera) {
-                this._modeEl.textContent = 'FLY · no camera draws to the screen, fly one from the Cameras tab';
+                this._modeEl.textContent = kind === 'orbit' ?
+                    'ORBIT · no camera draws to the screen' :
+                    'FLY · no camera draws to the screen, fly one from the Cameras tab';
                 return;
             }
         }
-        this._fly = new CameraFly(this._app, camera, () => this._stopFly());
-        this._flyBtn.classList.add('pci-active');
+        this._fly = kind === 'orbit' ?
+            new CameraOrbit(this._app, camera, target, () => this._stopFly()) :
+            new CameraFly(this._app, camera, () => this._stopFly());
+        button.classList.add('pci-active');
         this._properties.refresh();
     }
 
@@ -2969,6 +3029,17 @@ class Inspector {
             this._properties.refresh();
         }
         this._flyBtn?.classList.remove('pci-active');
+        this._orbitBtn?.classList.remove('pci-active');
+        this._applyOrbitState();
+    }
+
+    /**
+     * Orbit needs a node to orbit around, so its button is off until one is selected.
+     *
+     * @private
+     */
+    _applyOrbitState() {
+        if (this._orbitBtn) this._orbitBtn.disabled = !this._selected && !(this._fly instanceof CameraOrbit);
     }
 
     /**
@@ -2988,7 +3059,10 @@ class Inspector {
     _releaseCanvas() {
         this._canvasCapture?.destroy();
         this._canvasCapture = null;
-        if (this._canvasMode === 'choose') this._flyBtn.classList.remove('pci-active');
+        if (this._canvasMode === 'choose') {
+            this._flyBtn.classList.remove('pci-active');
+            this._orbitBtn.classList.remove('pci-active');
+        }
         this._canvasMode = null;
         this._hovered = null;
         this._hoverPoint = null;
@@ -3096,12 +3170,14 @@ class Inspector {
         if (this._canvasMode === 'pick') {
             text = `PICK · ${this._hovered ? `"${this._hovered.name}", click to select` : 'hover an entity, click to select'} · Esc stops`;
         } else if (this._canvasMode === 'choose') {
-            text = 'FLY · click the view of the camera to fly · Esc stops';
+            text = `${this._chooseKind.toUpperCase()} · click the view of the camera to ${this._chooseKind} · Esc stops`;
+        } else if (this._fly instanceof CameraOrbit) {
+            text = `ORBIT · "${this._fly.camera.entity.name}" around "${this._fly.target.name}" · drag to orbit, right-drag or Shift-drag to pan, wheel to zoom · Esc stops`;
         } else if (this._fly) {
             const keys = this._fly.zooms ? 'W S zoom, A D Q E pan' : 'WASD QE move';
             text = `FLY · "${this._fly.camera.entity.name}" · ${keys}, drag to look, wheel speed ${this._fly.speed.toFixed(1)}, Shift faster · Esc stops`;
         }
-        if (this._modeEl.textContent !== text && (text || !this._modeEl.textContent.startsWith('FLY · no camera'))) this._modeEl.textContent = text;
+        if (this._modeEl.textContent !== text && (text || !this._modeEl.textContent.includes(' · no camera'))) this._modeEl.textContent = text;
     }
 
     /**

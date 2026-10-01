@@ -15,6 +15,7 @@ Copied from [playcanvas/engine](https://github.com/playcanvas/engine) `v2.23.0-b
 | `src/picker/picker.js` | `src/framework/graphics/picker.js` |
 | `src/picker/render-pass-picker.js` | `src/framework/graphics/render-pass-picker.js` |
 | `src/input/fly-controller.js` | `src/extras/input/controllers/fly-controller.js` |
+| `src/input/orbit-controller.js` | `src/extras/input/controllers/orbit-controller.js` |
 | `src/input/input.js` | `src/extras/input/input.js` |
 | `src/input/pose.js` | `src/extras/input/pose.js` |
 | `src/input/math.js` | `src/extras/input/math.js` |

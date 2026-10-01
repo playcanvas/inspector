@@ -25,7 +25,7 @@ import { buildScriptModel, isScriptClass, scriptListRows, surveyScripts } from '
 import { buildShaderModel, formatBindGroup, formatUniformBuffer, shaderRows } from '../src/shader-view.js';
 import { buildTextureModel, collectTextures, textureRows } from '../src/texture-view.js';
 import { installTooltip, setTip } from '../src/tooltip.js';
-import { CameraFly, WireframeMode, screenCameraAt } from '../src/viewport-tools.js';
+import { CameraFly, CameraOrbit, WireframeMode, screenCameraAt } from '../src/viewport-tools.js';
 import { jsdomSetup, jsdomTeardown } from './jsdom.mjs';
 
 /**
@@ -2271,6 +2271,51 @@ describe('Inspector viewport tools', function () {
         app.fire('postrender');
         window.dispatchEvent(new window.KeyboardEvent('keyup', { code: 'KeyW', key: 'w' }));
         fly.destroy();
+    });
+
+    it('orbits a camera around a node, turning to it, following it and leaving the app its own pose', function () {
+        const app = /** @type {any} */ (new EventHandler());
+        app.graphicsDevice = { canvas: document.createElement('canvas') };
+        const camera = cameraStub('Camera');
+        const entity = camera.entity;
+        entity.setPosition(0, 1, 5);
+        const target = new Entity('Target');
+        target.setPosition(3, 0, 0);
+        const distance = entity.getPosition().distance(target.getPosition());
+
+        let ended = 0;
+        const orbit = new CameraOrbit(app, camera, target, () => ended++);
+        const frame = () => {
+            orbit._lastTime = performance.now() - 100;
+            app.fire('prerender');
+        };
+        const toTarget = new Vec3();
+        const looksAtTarget = () => toTarget.sub2(target.getPosition(), entity.getPosition()).normalize().dot(entity.forward);
+
+        // the camera turns to the target from where it is, keeping its distance
+        for (let i = 0; i < 20; i++) {
+            frame();
+            app.fire('postrender');
+        }
+        frame();
+        expect(looksAtTarget()).to.be.closeTo(1, 1e-3);
+        expect(entity.getPosition().distance(target.getPosition())).to.be.closeTo(distance, 1e-3);
+        const orbiting = entity.getPosition().clone();
+        app.fire('postrender');
+        expect(entity.getPosition().z).to.equal(5);
+
+        // the orbit follows the target as it moves, at once
+        target.setPosition(4, 0, 0);
+        frame();
+        expect(entity.getPosition().x).to.be.closeTo(orbiting.x + 1, 1e-3);
+        expect(looksAtTarget()).to.be.closeTo(1, 1e-3);
+        app.fire('postrender');
+
+        window.dispatchEvent(new window.KeyboardEvent('keydown', { code: 'Escape', key: 'Escape' }));
+        expect(ended).to.equal(1);
+        orbit.destroy();
+        expect(app.hasEvent('prerender')).to.be.false;
+        target.destroy();
     });
 
     it('lists cameras in render order with where they draw and their render mode', function () {
