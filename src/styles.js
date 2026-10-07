@@ -509,6 +509,70 @@ ${ICON_RULES}
         opacity: 0.45;
     }
 
+    /* the head of a group of rows, which opens and closes it */
+    .pci-lrow.pci-lrow-header {
+        background-color: var(--pci-raised);
+        color: var(--pci-text);
+        font-weight: 600;
+    }
+
+    .pci-lrow.pci-lrow-header ~ .pci-lrow.pci-lrow-header {
+        border-top: 1px solid var(--pci-border);
+    }
+
+    .pci-lrow.pci-lrow-header::before {
+        content: "▸";
+        flex: 0 0 10px;
+        color: var(--pci-text-label);
+        font-size: 12px;
+    }
+
+    .pci-lrow.pci-lrow-header.pci-open::before {
+        content: "▾";
+    }
+
+    .pci-lrow.pci-lrow-header.pci-leaf::before {
+        content: "";
+    }
+
+    .pci-lrow.pci-lrow-header:hover {
+        background-color: #263133;
+    }
+
+    /* rows that only show figures, and headers with nothing to open */
+    .pci-lrow.pci-inert,
+    .pci-lrow.pci-lrow-header.pci-leaf {
+        cursor: default;
+    }
+
+    .pci-lrow.pci-inert:hover {
+        background-color: transparent;
+    }
+
+    .pci-lrow.pci-lrow-header.pci-leaf:hover {
+        background-color: var(--pci-raised);
+    }
+
+    /* a count and a size in columns of their own, lining up from row to row */
+    .pci-cell-count {
+        flex-shrink: 0;
+        margin-left: auto;
+        min-width: 5ch;
+        text-align: right;
+        color: var(--pci-text-label);
+        font-family: var(--pci-mono);
+        font-size: 10.5px;
+        font-weight: normal;
+    }
+
+    .pci-cell-size {
+        flex-shrink: 0;
+        min-width: 11ch;
+        text-align: right;
+        font-family: var(--pci-mono);
+        font-size: 10.5px;
+    }
+
     .pci-cell {
         flex: 0 1 auto;
         min-width: 0;

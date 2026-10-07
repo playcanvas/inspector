@@ -15,7 +15,7 @@ import { ListView } from '../src/list-view.js';
 import {
     buildMaterialModel, materialListRows, materialsUsingShader, materialsUsingTexture, surveyMaterials, usedByMaterialsSection
 } from '../src/material-view.js';
-import { bufferOwners, bufferRows, buildBufferModel, collectBuffers, memorySummary } from '../src/memory-view.js';
+import { bufferOwners, buildBufferModel, collectBuffers, memoryRows } from '../src/memory-view.js';
 import { buildMeshModel, meshListRows, meshNote, surveyMeshes } from '../src/mesh-view.js';
 import { formatBytes, makeSection } from '../src/model.js';
 import { buildNodeModel, materialRows as buildMaterialRows, meshInstanceRows, meshRows as buildMeshRows } from '../src/node-model.js';
@@ -377,26 +377,23 @@ describe('Inspector', function () {
         inspector.destroy();
     });
 
-    it('opens a linked buffer on the memory tab, showing every kind when a filter would hide it', function () {
+    it('opens a linked buffer on the memory tab, opening the group it is listed in', function () {
         const inspector = /** @type {any} */ (new Inspector(app));
         const mesh = new Mesh(app.graphicsDevice);
         mesh.setPositions([0, 0, 0, 1, 0, 0, 0, 1, 0]);
         mesh.setIndices([0, 1, 2]);
         mesh.update();
+        const open = () => [...panel(inspector).querySelectorAll('.pci-lrow-header.pci-open')].map(row => row.firstChild.textContent);
 
-        inspector._bufferKind.value = 'index';
         inspector._selectAny(mesh.vertexBuffer);
         expect(inspector._tab).to.equal('memory');
-        expect(inspector._bufferKind.value).to.equal('all');
         expect(inspector._bufferList.selected).to.equal(mesh.vertexBuffer);
         expect(inspector._properties.subject).to.equal(mesh.vertexBuffer);
-        expect(inspector._memoryNote.textContent).to.match(/^VRAM: textures/);
+        expect(open()).to.deep.equal(['Vertex buffers']);
 
-        // with the kind filter matching, it is left alone
-        inspector._bufferKind.value = 'index';
         inspector._selectAny(mesh.indexBuffer[0]);
-        expect(inspector._bufferKind.value).to.equal('index');
         expect(inspector._bufferList.selected).to.equal(mesh.indexBuffer[0]);
+        expect(open()).to.deep.equal(['Vertex buffers', 'Index buffers']);
 
         mesh.destroy();
         inspector.destroy();
@@ -1508,13 +1505,17 @@ describe('Inspector memory view', function () {
         app.lines.destroy();
         expect(of(device.quadVertexBuffer)[0].label).to.equal('Graphics device');
 
-        const rows = bufferRows(device, owners, 'all');
-        const row = buffer => rows.find(r => r.item === buffer);
-        expect(row(mesh.vertexBuffer).cells.map(c => c.text).slice(0, 3)).to.deep.equal(['wall', 'vertex', '30 vertices, 1 elements · vertices']);
-        expect(row(mesh.vertexBuffer).dim).to.be.false;
-        // nothing reachable holds the storage buffer, so it keeps a generated name and is dimmed
-        expect(row(storage).name).to.match(/^StorageBuffer #\d+$/);
-        expect(row(storage).dim).to.be.true;
+        const rows = memoryRows(device, owners);
+        const info = buffer => rows.find(r => r.item === buffer).cells.map(c => c.text);
+        expect(info(mesh.vertexBuffer).slice(0, 2)).to.deep.equal(['wall', '30 vertices, 1 element']);
+        // the role is told only when it is not what a buffer of the kind plainly holds
+        expect(info(uniforms)[1]).to.equal('1 uniform · material uniforms');
+        expect(info(device.quadIndexBuffer)[1]).to.equal('6 indices, UINT16 · full screen quad indices');
+        expect(rows.find(r => r.item === mesh.vertexBuffer).dim).to.be.false;
+        // nothing reachable holds the storage buffer, so it is dimmed and says so
+        const unowned = rows.find(r => r.item === storage);
+        expect(unowned.name).to.equal('(owner not found)');
+        expect(unowned.dim).to.be.true;
     });
 
     it('names owners with their parent and tells the index buffers of a mesh apart', function () {
@@ -1547,16 +1548,60 @@ describe('Inspector memory view', function () {
         expect(byLabel(storageUsers, 'owners').text).to.match(/^not found/);
     });
 
-    it('sums video memory by kind of resource', function () {
-        const summary = memorySummary(device);
-        expect(summary.split('\n')[0]).to.match(/^VRAM: textures .* · vertex .* · index .* · uniform .* · storage /);
-        expect(summary).to.match(/shaders \d+/);
+    it('groups video memory by kind of resource, each headed by its count and size', function () {
+        const rows = memoryRows(device, new Map());
+        const headers = rows.filter(r => r.header);
+        expect(headers.map(r => r.name)).to.deep.equal(['Textures', 'Vertex buffers', 'Index buffers', 'Uniform buffers', 'Storage buffers', 'Device caches']);
+        expect(headers.some(r => r.open)).to.be.false;
 
-        // a pool of fixed blocks reads as count and size, one of whole buffers as a count
-        const withPool = pool => memorySummary(/** @type {any} */ (Object.assign(Object.create(device), { dynamicBuffers: pool })));
-        expect(withPool({ bufferCount: 2, bufferSize: 102400 })).to.match(/per-draw uniform pool: 2 × 100.0 KB/);
-        expect(withPool({ bufferCount: 38, bufferSize: 0 })).to.match(/per-draw uniform pool: 38 buffers/);
-        expect(withPool({ bufferCount: 0, bufferSize: 0 })).to.not.match(/uniform pool/);
+        // each group holds the buffers of its kind, largest first, and sums them in its header
+        const group = (name) => {
+            const start = rows.findIndex(r => r.header && r.name === name);
+            const end = rows.findIndex((r, i) => i > start && r.header);
+            return { header: rows[start].cells.map(c => c.text), items: rows.slice(start + 1, end < 0 ? undefined : end).map(r => r.item) };
+        };
+        const vertex = collectBuffers(device, 'vertex');
+        const bytes = vertex.reduce((sum, buffer) => sum + buffer.numBytes, 0);
+        expect(group('Vertex buffers')).to.deep.equal({ header: ['Vertex buffers', String(vertex.length), formatBytes(bytes)], items: vertex });
+        expect(group('Storage buffers')).to.deep.equal({ header: ['Storage buffers', '1', '4.0 KB'], items: [storage] });
+        expect(group('Uniform buffers').header).to.deep.equal(['Uniform buffers', '1', formatBytes(uniforms.format.byteSize)]);
+
+        // the device caches are counted, in the column of the group counts
+        const shaders = rows.find(r => r.key === 'caches:shaders');
+        expect(shaders.inert).to.be.true;
+        expect(shaders.cells[2].text).to.equal(String(device.shaders.length));
+    });
+
+    it('splits the textures by what they are for, where the engine tracks that', function () {
+        const split = vram => memoryRows(/** @type {any} */ (Object.assign(Object.create(device), { _vram: vram })), new Map())
+        .filter(r => r.key.startsWith('textures:')).map(r => [r.name, r.cells[3].text]);
+        // only profiler builds track the split
+        expect(split({ tex: 1000 })).to.deep.equal([]);
+        expect(split({ tex: 1000, texAsset: 600, texShadow: 300, texLightmap: 0 })).to.deep.equal([
+            ['assets', '600 B'], ['shadow maps', '300 B'], ['lightmaps', '0 B'], ['other', '100 B']
+        ]);
+    });
+
+    it('lists the per-draw uniform pool with the uniform buffers', function () {
+        const persistent = uniforms.format.byteSize;
+        const withPool = (pool, pooled) => {
+            const rows = memoryRows(/** @type {any} */ (Object.assign(Object.create(device), {
+                dynamicBuffers: pool, _vram: { ub: persistent + pooled }
+            })), new Map());
+            return {
+                header: rows.find(r => r.header && r.name === 'Uniform buffers').cells.map(c => c.text),
+                pool: rows.find(r => r.key === 'uniform:pool')?.cells.map(c => c.text)
+            };
+        };
+        // WebGPU carves draws out of fixed blocks written through staging copies, all counted in
+        // the size, while only the blocks count as buffers like the engine counts them
+        expect(withPool({ bufferCount: 1, bufferSize: 102400, stagingBuffers: [{}, {}] }, 3 * 102400)).to.deep.equal({
+            header: ['Uniform buffers', '2', formatBytes(persistent + 3 * 102400)],
+            pool: ['per-draw uniform pool', '1 buffer + 2 staging, 100.0 KB each', '', '300.0 KB']
+        });
+        // WebGL2 keeps whole buffers of each size requested
+        expect(withPool({ bufferCount: 38, bufferSize: 0 }, 2048).pool).to.deep.equal(['per-draw uniform pool', '38 buffers', '', '2.0 KB']);
+        expect(withPool({ bufferCount: 0, bufferSize: 0 }, 0).pool).to.equal(undefined);
     });
 });
 
@@ -2439,6 +2484,51 @@ describe('Inspector hierarchy filter', function () {
 describe('Inspector list view', function () {
     beforeEach(jsdomSetup);
     afterEach(jsdomTeardown);
+
+    it('opens and closes groups under their headers, and finds matches in closed groups', function () {
+        const container = document.createElement('div');
+        const selected = [];
+        const list = new ListView(container, item => selected.push(item));
+        const rows = () => [
+            { key: 'fruit', item: null, name: 'Fruit', header: true, cells: [{ text: 'Fruit' }] },
+            { key: 'a', item: 1, name: 'apple', cells: [{ text: 'apple' }] },
+            { key: 'b', item: 2, name: 'banana', cells: [{ text: 'banana' }] },
+            { key: 'nuts', item: null, name: 'Nuts', header: true, open: true, cells: [{ text: 'Nuts' }] },
+            { key: 'c', item: 3, name: 'cashew', cells: [{ text: 'cashew' }] },
+            { key: 'note', item: null, name: 'count', inert: true, cells: [{ text: 'count' }] },
+            { key: 'empty', item: null, name: 'Empty', header: true, cells: [{ text: 'Empty' }] }
+        ];
+        list.setRows(rows());
+        const elements = () => [...container.querySelectorAll('.pci-lrow')];
+        const shown = () => elements().filter(row => row.style.display !== 'none').map(row => row.textContent);
+        const row = text => elements().find(el => el.textContent === text);
+        expect(shown()).to.deep.equal(['Fruit', 'Nuts', 'cashew', 'count', 'Empty']);
+        expect(row('Empty').classList.contains('pci-leaf')).to.be.true;
+
+        // a header opens and closes on click, is never selected, and stays as left across refreshes
+        row('Fruit').click();
+        row('Nuts').click();
+        list.setRows(rows());
+        expect(shown()).to.deep.equal(['Fruit', 'apple', 'banana', 'Nuts', 'Empty']);
+        // a row that only shows figures is not selected either
+        row('Nuts').click();
+        row('count').click();
+        expect(selected).to.deep.equal([]);
+        expect(list.selectedKey).to.equal(null);
+
+        // a filter shows the matches of closed groups too, and only the headers of groups with matches
+        row('Fruit').click();
+        list.filter = 'an';
+        list.render();
+        expect(shown()).to.deep.equal(['Fruit', 'banana']);
+        expect(list.visibleCount).to.equal(1);
+
+        // selecting an item opens its group
+        list.filter = '';
+        expect(list.selectItem(2)).to.be.true;
+        expect(shown()).to.deep.equal(['Fruit', 'apple', 'banana', 'Nuts', 'cashew', 'count', 'Empty']);
+        expect(list.selectedRow.name).to.equal('banana');
+    });
 
     it('lets a row decide whether it matches the filter', function () {
         const container = document.createElement('div');

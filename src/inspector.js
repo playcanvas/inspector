@@ -9,7 +9,7 @@ import { pushResourceUsage } from './asset-usage.js';
 import { ASSET_SORTS, assetRows, buildAssetModel, collectAssets } from './asset-view.js';
 import { buildCameraModel, cameraRows, collectCameras } from './camera-view.js';
 import { INSTANCES_PER_PAGE, LayerStepSelection, buildPassModel, buildStepModel, captureFrameGraph, passRows } from './frame-graph-view.js';
-import { BUFFER_KINDS, bufferBytes, bufferKind, bufferOwners, bufferRows, buildBufferModel, collectBuffers, idOf, memorySummary } from './memory-view.js';
+import { bufferKind, bufferOwners, buildBufferModel, KIND_NAMES, memoryRows, videoMemory } from './memory-view.js';
 import { HierarchyView, filterSuggestions } from './hierarchy-view.js';
 import { ListView } from './list-view.js';
 import {
@@ -109,7 +109,7 @@ const TAB_TIPS = {
     meshes: 'The meshes of the app, found through the components, layers and assets using them, largest first',
     materials: 'The materials of the app, found through the mesh instances and assets using them, most used first',
     scripts: 'The script classes of the app, registered or found on its entities, with the entities using each and its source',
-    memory: 'The vertex, index, uniform and storage buffers on the device, and what uses each',
+    memory: 'Video memory by kind of resource, and every buffer on the device with what uses it',
     shaders: 'The compiled shaders, with their sources',
     physics: 'The rigid bodies and joints of the physics world, and its debug drawing'
 };
@@ -199,8 +199,9 @@ function isTextTarget(e) {
  * - Scripts: every script class the script registry holds or an entity uses, with the entities using
  *   it, its declared attributes and its source as the browser keeps it. The script sections of an
  *   entity link here.
- * - Memory: video memory by kind of resource, and every buffer on the device, largest first, named
- *   after the mesh, material or asset it was found to belong to. Buffer values elsewhere link here.
+ * - Memory: video memory by kind of resource, each kind a group headed by its count and size that
+ *   opens to list its buffers largest first, named after the mesh, material or asset each was found
+ *   to belong to. Buffer values elsewhere link here.
  * - Shaders: every shader on the device with its language, state and vertex attributes. The
  *   compiled variants listed on a material link here.
  * - Physics: the rigid bodies and joints of the scene, with the physics world drawn over the scene
@@ -723,18 +724,6 @@ class Inspector {
      * @private
      */
     _instancePages = new Map();
-
-    /**
-     * @type {HTMLSelectElement}
-     * @private
-     */
-    _bufferKind;
-
-    /**
-     * @type {HTMLElement}
-     * @private
-     */
-    _memoryNote;
 
     /**
      * Model builder for the property view when a buffer is selected.
@@ -1510,21 +1499,17 @@ class Inspector {
         const scriptList = el('div', 'pci-list');
         scriptPanel.append(scriptList);
 
-        // memory: the totals over the buffers, which can be narrowed to one kind
+        // memory: a group per kind of resource, each opening to its buffers
         const memoryPanel = el('div', 'pci-listpanel');
-        const memoryBar = el('div', 'pci-subbar');
-        this._bufferKind = this._makeSelect(memoryBar, 'Show', BUFFER_KINDS, 'List and total only the buffers of this kind');
-        this._memoryNote = el('div', 'pci-note pci-note-info');
-        this._memoryNote.style.whiteSpace = 'pre-line';
         const bufferList = el('div', 'pci-list');
-        memoryPanel.append(memoryBar, this._memoryNote, bufferList);
+        memoryPanel.append(bufferList);
 
         // shaders: a plain list
         const shaderPanel = el('div', 'pci-listpanel');
         const shaderList = el('div', 'pci-list');
         shaderPanel.append(shaderList);
 
-        for (const input of [this._previewToggle, this._previewAttachment, this._previewChannels, this._texturePreviewToggle, this._textureChannels, this._assetSort, this._bufferKind]) {
+        for (const input of [this._previewToggle, this._previewAttachment, this._previewChannels, this._texturePreviewToggle, this._textureChannels, this._assetSort]) {
             input.addEventListener('change', () => this._saveSettings());
         }
 
@@ -1833,7 +1818,6 @@ class Inspector {
             if (typeof stored.targetPreview.channels === 'string') this._previewChannels.value = stored.targetPreview.channels;
         }
         if (typeof stored.assetSort === 'string') this._assetSort.value = stored.assetSort;
-        if (typeof stored.bufferKind === 'string') this._bufferKind.value = stored.bufferKind;
         if (typeof stored.filterBy === 'string') {
             this._filterBy.value = stored.filterBy;
             this._hierarchy.filterBy = /** @type {any} */ (this._filterBy.value);
@@ -1871,7 +1855,6 @@ class Inspector {
                 targetPreview: { enabled: this._previewToggle.checked, channels: this._previewChannels.value },
                 texturePreview: { enabled: this._texturePreviewToggle.checked, channels: this._textureChannels.value },
                 assetSort: this._assetSort.value,
-                bufferKind: this._bufferKind.value,
                 filterBy: this._filterBy.value
             }));
         } catch (e) {
@@ -2568,8 +2551,7 @@ class Inspector {
                 this._properties.setSubject(cls, this._scriptModel, this._scriptList.selectedKey);
             }
         } else if (this._tab === 'memory') {
-            Inspector._setNote(this._memoryNote, memorySummary(device));
-            this._bufferList.setRows(bufferRows(device, bufferOwners(this._app), this._bufferKind.value));
+            this._bufferList.setRows(memoryRows(device, bufferOwners(this._app)));
             const buffer = this._bufferList.selected;
             if (buffer !== this._properties.subject) {
                 this._properties.setSubject(buffer, this._bufferModel, this._bufferList.selectedKey);
@@ -2668,8 +2650,6 @@ class Inspector {
             this._setTab('meshes');
             this._meshList.selectItem(target);
         } else if (bufferKind(target)) {
-            // a filter hiding the buffer's kind would leave nothing to select
-            if (this._bufferKind.value !== 'all' && this._bufferKind.value !== bufferKind(target)) this._bufferKind.value = 'all';
             this._setTab('memory');
             this._bufferList.selectItem(target);
         }
@@ -2867,11 +2847,10 @@ class Inspector {
                 break;
             }
             case 'memory': {
-                const buffers = collectBuffers(device, this._bufferKind.value);
-                const bytes = buffers.reduce((sum, buffer) => sum + bufferBytes(buffer), 0);
-                counts = `${buffers.length} buffers · ${formatBytes(bytes)}`;
-                const buffer = this._bufferList.selected;
-                selected = buffer ? `${buffer.constructor.name} #${idOf(buffer)}` : '';
+                counts = `${formatBytes(videoMemory(device))} of video memory`;
+                // a buffer whose owner was not found is dimmed, and its name says only that
+                const row = this._bufferList.selectedRow;
+                selected = row ? `${KIND_NAMES[bufferKind(row.item)]}${row.dim ? '' : ` of ${row.name}`}` : '';
                 break;
             }
             case 'assets': {
