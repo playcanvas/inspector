@@ -36,6 +36,13 @@ const GUTTER_GAP = 2;
  * it is hovered.
  * @property {boolean} [dim] - Whether the row is shown dimmed.
  * @property {string} [title] - A tooltip for the whole row.
+ * @property {boolean} [header] - Whether the row heads a group: the rows after it, up to the next
+ * header, belong to it and are shown only while it is open. Clicking a header opens or closes it
+ * instead of selecting it.
+ * @property {boolean} [open] - Whether a header starts out open. Once it is clicked, the list
+ * remembers its state across refreshes.
+ * @property {boolean} [inert] - Whether the row only shows information: clicking it selects
+ * nothing.
  */
 
 /**
@@ -94,9 +101,10 @@ function guideStyle(guides) {
 }
 
 /**
- * A flat, selectable list of rows with cells. Rows are keyed and reconciled in place, so a list
- * rebuilt from scratch a couple of times a second keeps its selection and scroll position and only
- * touches the text that changed.
+ * A flat, selectable list of rows with cells, optionally in groups under headers that open and
+ * close them. Rows are keyed and reconciled in place, so a list rebuilt from scratch a couple of
+ * times a second keeps its selection, open groups and scroll position and only touches the text
+ * that changed.
  *
  * @ignore
  */
@@ -172,6 +180,14 @@ class ListView {
     _entries = new Map();
 
     /**
+     * Whether each header the user opened or closed is open, by row key.
+     *
+     * @type {Map<string, boolean>}
+     * @private
+     */
+    _open = new Map();
+
+    /**
      * @param {HTMLElement} container - The element to render into.
      * @param {(item: *, key: string|null) => void} onSelect - The selection callback.
      * @param {(target: *) => void} [onLink] - The link callback.
@@ -197,7 +213,16 @@ class ListView {
      * @type {*}
      */
     get selected() {
-        return this._rows.find(row => row.key === this.selectedKey)?.item ?? null;
+        return this.selectedRow?.item ?? null;
+    }
+
+    /**
+     * The selected row, or null when nothing is selected or the row is gone.
+     *
+     * @type {ListRow|null}
+     */
+    get selectedRow() {
+        return this._rows.find(row => row.key === this.selectedKey) ?? null;
     }
 
     /**
@@ -230,10 +255,26 @@ class ListView {
      * @returns {boolean} Whether a row was found.
      */
     selectItem(item) {
-        const row = this._rows.find(r => r.item === item);
-        if (!row) return false;
-        this.select(row.key);
+        const index = this._rows.findIndex(r => !r.header && r.item === item);
+        if (index < 0) return false;
+        // open the group the row is in, or it would be selected out of sight
+        for (let i = index - 1; i >= 0; i--) {
+            if (this._rows[i].header) {
+                this._open.set(this._rows[i].key, true);
+                break;
+            }
+        }
+        this.select(this._rows[index].key);
         return true;
+    }
+
+    /**
+     * @param {ListRow} row - A header row.
+     * @returns {boolean} Whether its group is open.
+     * @private
+     */
+    _isOpen(row) {
+        return this._open.get(row.key) ?? !!row.open;
     }
 
     /**
@@ -241,21 +282,22 @@ class ListView {
      */
     render() {
         const filter = this.filter.trim().toLowerCase();
+        const shown = this._shownRows(filter);
         const seen = new Set();
         let cursor = this.container.firstChild;
         let visible = 0;
 
-        for (const row of this._rows) {
+        for (let i = 0; i < this._rows.length; i++) {
+            const row = this._rows[i];
             const entry = this._entries.get(row.key) ?? this._createEntry(row);
             entry.row = row;
             seen.add(row.key);
 
             this._syncCells(entry, row.cells);
 
-            const shown = !filter || (row.matches ? row.matches(filter) : row.name.toLowerCase().includes(filter));
-            const display = shown ? '' : 'none';
+            const display = shown[i] ? '' : 'none';
             if (entry.el.style.display !== display) entry.el.style.display = display;
-            if (shown) visible++;
+            if (shown[i] && !row.header) visible++;
 
             const indent = row.indent ?? 0;
             const guides = row.guides ? `${row.guides.lanes}|${row.guides.segments.join(',')}|${row.guides.tick}` : '';
@@ -275,6 +317,12 @@ class ListView {
 
             entry.el.classList.toggle('pci-selected', row.key === this.selectedKey);
             entry.el.classList.toggle('pci-dim', !!row.dim);
+            entry.el.classList.toggle('pci-lrow-header', !!row.header);
+            entry.el.classList.toggle('pci-open', !!row.header && this._isOpen(row));
+            // a header with nothing under it has nothing to open
+            const next = this._rows[i + 1];
+            entry.el.classList.toggle('pci-leaf', !!row.header && (!next || !!next.header));
+            entry.el.classList.toggle('pci-inert', !!row.inert);
 
             if (entry.el !== cursor) {
                 this.container.insertBefore(entry.el, cursor);
@@ -291,6 +339,34 @@ class ListView {
         }
 
         this.visibleCount = visible;
+    }
+
+    /**
+     * Decides which rows are shown. Without a filter, the rows of a closed group are hidden. With
+     * one, every matching row is shown whether its group is open or not, and a header is shown when
+     * any row of its group matches.
+     *
+     * @param {string} filter - The lower-cased filter, or an empty string for none.
+     * @returns {boolean[]} Whether each row is shown.
+     * @private
+     */
+    _shownRows(filter) {
+        const shown = [];
+        let header = -1;
+        for (let i = 0; i < this._rows.length; i++) {
+            const row = this._rows[i];
+            if (row.header) {
+                header = i;
+                shown.push(!filter);
+            } else if (filter) {
+                const match = row.matches ? row.matches(filter) : row.name.toLowerCase().includes(filter);
+                if (match && header >= 0) shown[header] = true;
+                shown.push(match);
+            } else {
+                shown.push(header < 0 || this._isOpen(this._rows[header]));
+            }
+        }
+        return shown;
     }
 
     /**
@@ -383,9 +459,17 @@ class ListView {
     _createEntry(row) {
         const rowEl = document.createElement('div');
         rowEl.className = 'pci-lrow';
-        rowEl.addEventListener('click', () => this.select(row.key));
 
         const entry = { el: rowEl, cells: [], row, indent: -1, guides: '' };
+        rowEl.addEventListener('click', () => {
+            const current = entry.row;
+            if (current.header) {
+                this._open.set(current.key, !this._isOpen(current));
+                this.render();
+            } else if (!current.inert) {
+                this.select(current.key);
+            }
+        });
         rowEl.addEventListener('pointerenter', () => this._hoverRow(entry));
         rowEl.addEventListener('pointerleave', () => this.onHover?.(null, null));
         this._entries.set(row.key, entry);
