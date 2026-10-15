@@ -512,6 +512,75 @@ describe('Inspector', function () {
         texture.destroy();
     });
 
+    it('turns a gizmo on from its button, and says so when no camera draws to the screen', function () {
+        const inspector = /** @type {any} */ (new Inspector(app));
+        const buttons = ['translate', 'rotate', 'scale'].map(name => panel(inspector).querySelector(`.pci-i-${name}`));
+        expect(buttons.every(button => button && !button.disabled)).to.be.true;
+
+        // the app here has no camera to draw the gizmo in
+        buttons[0].click();
+        expect(inspector._transformTool).to.equal(null);
+        expect(inspector._modeEl.textContent).to.equal('TRANSLATE · no camera draws to the screen');
+        expect(buttons.some(button => button.classList.contains('pci-active'))).to.be.false;
+
+        inspector.destroy();
+    });
+
+    it('turns a gizmo off on Escape, unless the Escape is for a text field', function () {
+        const inspector = /** @type {any} */ (new Inspector(app));
+        let destroyed = 0;
+        inspector._transformTool = { mode: 'rotate', root: null, attach() {}, handle: () => false, destroy: () => destroyed++ };
+        // as turning a gizmo on does
+        window.addEventListener('keydown', inspector._onTransformKey, true);
+        const escape = () => new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
+
+        // a value being edited takes its own Escape
+        const field = document.createElement('input');
+        document.body.appendChild(field);
+        field.dispatchEvent(escape());
+        expect(destroyed).to.equal(0);
+
+        window.dispatchEvent(escape());
+        expect(destroyed).to.equal(1);
+        expect(inspector._transformTool).to.equal(null);
+        expect(panel(inspector).querySelector('.pci-i-pick').disabled).to.be.false;
+        // the key goes with the gizmo
+        window.dispatchEvent(escape());
+        expect(destroyed).to.equal(1);
+
+        inspector.destroy();
+    });
+
+    it('stops Pick, Fly and Orbit when a gizmo turns on, and keeps them off while it is on', function () {
+        const node = new GraphNode('box');
+        app.root.addChild(node);
+        const inspector = /** @type {any} */ (new Inspector(app));
+        const button = name => panel(inspector).querySelector(`.pci-i-${name}`);
+        inspector._selectAny(node);
+
+        // turning a gizmo on stops picking, even where there is no camera to show the gizmo in
+        button('pick').click();
+        expect(inspector._canvasMode).to.equal('pick');
+        button('translate').click();
+        expect(inspector._canvasMode).to.equal(null);
+        expect(button('pick').classList.contains('pci-active')).to.be.false;
+
+        // while a gizmo is on, their buttons are off and nothing else starts them
+        inspector._transformTool = { mode: 'translate', root: null, attach() {}, handle: () => false, destroy() {} };
+        inspector._applyViewToolState();
+        expect(['pick', 'fly', 'orbit'].map(name => button(name).disabled)).to.deep.equal([true, true, true]);
+        inspector._setPicking(true);
+        expect(inspector._canvasMode).to.equal(null);
+        inspector._startDrive('orbit', null);
+        expect(inspector._fly).to.equal(null);
+
+        // and they come back when it turns off
+        inspector._setTransformMode(null);
+        expect(['pick', 'fly', 'orbit'].map(name => button(name).disabled)).to.deep.equal([false, false, false]);
+
+        inspector.destroy();
+    });
+
     it('resolves a component asset id to a linked asset and opens it on the assets tab', function () {
         const inspector = /** @type {any} */ (new Inspector(app));
         const texture = new Asset('bricks', 'texture', { url: 'bricks.png', size: 2048 });
@@ -2556,6 +2625,13 @@ describe('Inspector viewport tools', function () {
         const fly = general.rows.find(row => row.label === 'fly').value.actions[0];
         fly.run();
         expect(flown).to.equal(main);
+
+        // while a gizmo is on, no camera can be flown, and the row says why
+        const [blocked] = buildCameraModel(main, { app, cameraActions: { fly: () => {}, flying: null, unavailable: 'Turn the gizmo off to fly a camera' } });
+        const blockedFly = blocked.rows.find(row => row.label === 'fly').value;
+        expect(blockedFly.text).to.equal('Turn the gizmo off to fly a camera');
+        expect(blockedFly.actions[0].disabled).to.be.true;
+        expect(blockedFly.actions[0].title).to.equal('Turn the gizmo off to fly a camera');
     });
 });
 

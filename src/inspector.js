@@ -31,6 +31,7 @@ import { styles } from './styles.js';
 import { installTooltip, setTip } from './tooltip.js';
 import { CameraFly, CameraOrbit, CanvasCapture, RENDER_MODES, ViewportPicker, WireframeMode, isScreenCamera, screenCameraAt } from './viewport-tools.js';
 import { buildTextureModel, collectTextures, textureRows } from './texture-view.js';
+import { TRANSFORM_POINTER_EVENTS, TransformTool } from './transform-tool.js';
 
 /** @import { AppBase } from 'playcanvas' */
 /** @import { GraphicsDevice } from 'playcanvas' */
@@ -39,6 +40,7 @@ import { buildTextureModel, collectTextures, textureRows } from './texture-view.
 /** @import { MenuItem } from './context-menu.js' */
 /** @import { CopyOptions } from './copy-json.js' */
 /** @import { CopyTarget } from './property-view.js' */
+/** @import { TransformMode } from './transform-tool.js' */
 
 /**
  * Options for {@link Inspector}.
@@ -465,6 +467,22 @@ class Inspector {
     _bodyList;
 
     /**
+     * The gizmo that moves, rotates or scales the selected entity, while one of its buttons is on.
+     *
+     * @type {TransformTool|null}
+     * @private
+     */
+    _transformTool = null;
+
+    /**
+     * The buttons of the gizmos, by what each does.
+     *
+     * @type {Record<TransformMode, HTMLButtonElement>}
+     * @private
+     */
+    _transformBtns;
+
+    /**
      * The menu opened with a right click, which copies what it was opened on.
      *
      * @type {ContextMenu|null}
@@ -785,7 +803,11 @@ class Inspector {
      */
     _cameraModel = camera => buildCameraModel(camera, {
         app: this._app,
-        cameraActions: { fly: target => this._startFly(target), flying: this._fly?.camera ?? null }
+        cameraActions: {
+            fly: target => this._startFly(target),
+            flying: this._fly?.camera ?? null,
+            unavailable: this._transformTool ? 'Turn the gizmo off to fly a camera' : null
+        }
     });
 
     /**
@@ -1023,6 +1045,9 @@ class Inspector {
         this._restoring = false;
 
         window.addEventListener('keydown', this._onKeyDown);
+        // ahead of every listener of the app and of the panel's own modes added later, so a gizmo
+        // being dragged keeps the pointer to itself
+        for (const type of TRANSFORM_POINTER_EVENTS) window.addEventListener(type, this._onTransformPointer, { capture: true, passive: false });
         // the app fires 'update' after every component system has updated, so the physics step of
         // the frame is done by the time the world is drawn
         app.on('update', this._onUpdate, this);
@@ -1041,6 +1066,7 @@ class Inspector {
         app.off('update', this._onUpdate, this);
         app.off('destroy', this.destroy, this);
         window.removeEventListener('keydown', this._onKeyDown);
+        for (const type of TRANSFORM_POINTER_EVENTS) window.removeEventListener(type, this._onTransformPointer, { capture: true });
         this._setDebugFrame(false);
         this._endViewportModes();
         this._picker?.destroy();
@@ -1366,6 +1392,19 @@ class Inspector {
         setTip(this._pickBtn, 'Pick an entity in the view: hover to see it outlined, click to select it. Esc stops');
         setTip(this._flyBtn, 'Fly the camera of the view with the mouse and WASD, without moving the app\'s own camera. Esc stops');
         setTip(this._orbitBtn, 'Orbit the camera of the view around the selected entity: drag to orbit, right-drag to pan, the wheel to zoom, without moving the app\'s own camera. Esc stops');
+        this._transformBtns = {
+            translate: iconButton('translate', 'Move'),
+            rotate: iconButton('rotate', 'Rotate'),
+            scale: iconButton('scale', 'Scale')
+        };
+        const transformTips = { translate: 'Move', rotate: 'Rotate', scale: 'Scale' };
+        for (const [mode, button] of Object.entries(this._transformBtns)) {
+            setTip(button, TransformTool.supported ?
+                `${transformTips[mode]} the selected entity with a gizmo in the view: drag its handles. Away from them the app has the view as usual; Pick, Fly and Orbit are off meanwhile. Click again or press Esc to stop` :
+                'The gizmos of this engine cannot be driven by the inspector');
+            button.disabled = !TransformTool.supported;
+            button.addEventListener('click', () => this._setTransformMode(this._transformTool?.mode === mode ? null : /** @type {TransformMode} */ (mode)));
+        }
         this._popBtn = iconButton('popout', 'Pop out');
         const closeBtn = iconButton('close', 'Hide');
         const toggleLabel = Inspector._keyLabel(this._toggleKey);
@@ -1373,7 +1412,8 @@ class Inspector {
         toolbar.append(
             title,
             this._pauseBtn, this._stepBtn, el('span', 'pci-sep'),
-            this._pickBtn, this._flyBtn, this._orbitBtn,
+            this._pickBtn, this._flyBtn, this._orbitBtn, el('span', 'pci-sep'),
+            this._transformBtns.translate, this._transformBtns.rotate, this._transformBtns.scale,
             el('span', 'pci-spacer'),
             this._popBtn, closeBtn
         );
@@ -1681,10 +1721,12 @@ class Inspector {
             this._selected = node;
             if (this._tab === 'hierarchy') this._properties.setSubject(node, buildNodeModel);
             if (node && this._fly instanceof CameraOrbit) this._fly.setTarget(node);
-            this._applyOrbitState();
+            this._transformTool?.attach(node);
+            this._applyViewToolState();
             this._updateStatus();
         });
         this._hierarchy.isLocked = node => this._isLocked(node);
+        this._hierarchy.isHidden = node => node === this._transformTool?.root;
         this._hierarchy.onToggle = () => this._properties.refresh();
         this._passList = new ListView(passList, (item, key) => {
             if (this._tab === 'passes') this._properties.setSubject(item, this._passListModel(item), key);
@@ -2798,7 +2840,12 @@ class Inspector {
         let result;
         let text;
         try {
-            result = copy.copy({ depth, modelFor: obj => this._copyModel(obj, ctx), opaque: obj => opaque.has(obj) });
+            result = copy.copy({
+                depth,
+                modelFor: obj => this._copyModel(obj, ctx),
+                opaque: obj => opaque.has(obj),
+                exclude: obj => obj === this._transformTool?.root
+            });
             text = stringifyCopy(result.json);
         } catch (e) {
             this._menu?.note(`Could not copy: ${e?.message ?? e}`);
@@ -3150,7 +3197,7 @@ class Inspector {
      * @private
      */
     _setPicking(on) {
-        if (on === (this._canvasMode === 'pick')) return;
+        if (on === (this._canvasMode === 'pick') || (on && this._transformTool)) return;
         this._releaseCanvas();
         if (on) {
             this._stopFly();
@@ -3242,6 +3289,7 @@ class Inspector {
      * @private
      */
     _startDrive(kind, camera) {
+        if (this._transformTool) return;
         this._stopFly();
         this._setPicking(false);
         const target = this._selected;
@@ -3286,16 +3334,22 @@ class Inspector {
         }
         this._flyBtn?.classList.remove('pci-active');
         this._orbitBtn?.classList.remove('pci-active');
-        this._applyOrbitState();
+        this._applyViewToolState();
     }
 
     /**
-     * Orbit needs a node to orbit around, so its button is off until one is selected.
+     * Pick, Fly and Orbit take the view from the app, which a gizmo needs to be used in, so their
+     * buttons are off while one is on. Orbit also needs a node to orbit around, so its button is off
+     * until one is selected.
      *
      * @private
      */
-    _applyOrbitState() {
-        if (this._orbitBtn) this._orbitBtn.disabled = !this._selected && !(this._fly instanceof CameraOrbit);
+    _applyViewToolState() {
+        if (!this._orbitBtn) return;
+        const gizmo = !!this._transformTool;
+        this._pickBtn.disabled = gizmo;
+        this._flyBtn.disabled = gizmo;
+        this._orbitBtn.disabled = gizmo || (!this._selected && !(this._fly instanceof CameraOrbit));
     }
 
     /**
@@ -3345,6 +3399,7 @@ class Inspector {
         if (!this._pickBtn) return;
         this._setPicking(false);
         this._stopFly();
+        this._setTransformMode(null);
         this._resetRenderOverrides();
         this._modeEl.textContent = '';
     }
@@ -3432,9 +3487,69 @@ class Inspector {
         } else if (this._fly) {
             const keys = this._fly.zooms ? 'W S zoom, A D Q E pan' : 'WASD QE move';
             text = `FLY · "${this._fly.camera.entity.name}" · ${keys}, drag to look, wheel speed ${this._fly.speed.toFixed(1)}, Shift faster · Esc stops`;
+        } else if (this._transformTool) {
+            const selected = this._selected;
+            text = `${this._transformTool.mode.toUpperCase()} · ${selected ? `drag the gizmo on "${selected.name}"` : 'select an entity'} · Esc stops`;
         }
         if (this._modeEl.textContent !== text && (text || !this._modeEl.textContent.includes(' · no camera'))) this._modeEl.textContent = text;
     }
+
+    /**
+     * Turns a gizmo on, in place of the one that is on, or turns it off. The gizmo is drawn and
+     * used in the view of the first camera drawing to the screen, which Pick, Fly and Orbit would
+     * take from the app, so they stop and stay off while it is on.
+     *
+     * @param {TransformMode|null} mode - What the gizmo does, or null to turn it off.
+     * @private
+     */
+    _setTransformMode(mode) {
+        window.removeEventListener('keydown', this._onTransformKey, true);
+        this._transformTool?.destroy();
+        this._transformTool = null;
+        if (mode) {
+            this._setPicking(false);
+            this._stopFly();
+            const camera = collectCameras(this._app).find(isScreenCamera) ?? null;
+            if (camera) {
+                this._transformTool = new TransformTool(this._app, mode, camera);
+                this._transformTool.attach(this._selected);
+                // Esc turns it off, as it ends Pick, Fly and Orbit
+                window.addEventListener('keydown', this._onTransformKey, true);
+            } else {
+                this._modeEl.textContent = `${mode.toUpperCase()} · no camera draws to the screen`;
+            }
+        }
+        for (const [id, button] of Object.entries(this._transformBtns ?? {})) {
+            button.classList.toggle('pci-active', this._transformTool?.mode === id);
+        }
+        this._applyViewToolState();
+        this._hierarchy?.refresh();
+        // the Cameras tab offers to fly only while no gizmo is on
+        this._properties?.refresh();
+    }
+
+    /**
+     * @param {KeyboardEvent} e - A key pressed while a gizmo is on.
+     * @private
+     */
+    _onTransformKey = (e) => {
+        // Escape in a text field, such as a value being edited, is the field's own
+        if (e.key !== 'Escape' || isTextTarget(e)) return;
+        e.stopImmediatePropagation();
+        this._setTransformMode(null);
+    };
+
+    /**
+     * Hands the pointer to the gizmo first, and keeps from everything else what it keeps.
+     *
+     * @param {Event} e - A pointer event anywhere in the window.
+     * @private
+     */
+    _onTransformPointer = (e) => {
+        if (!this._transformTool?.handle(e)) return;
+        e.stopImmediatePropagation();
+        if (e.cancelable) e.preventDefault();
+    };
 
     /**
      * Outlines a node in the viewport for the current frame.

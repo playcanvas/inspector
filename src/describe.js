@@ -29,6 +29,10 @@ import {
  * is made from it rather than from the text, which rounds numbers and cuts strings and lists short.
  * @property {boolean} [backlink] - Whether the value refers back to what holds or uses the
  * subject, such as a node's parent. Copies leave it out, so copying an object never climbs out of it.
+ * @property {{ text: string, apply: (text: string) => boolean }} [edit] - Makes the value
+ * editable: clicking it opens a text field holding `text`, and Enter or leaving the field hands the
+ * new text to `apply`, which changes the subject and returns whether it could. Escape leaves the
+ * value as it was.
  */
 
 /** The number of collection entries expanded into their own rows. */

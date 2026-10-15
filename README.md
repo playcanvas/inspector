@@ -63,6 +63,15 @@ needs the debug build of the engine.
 
 ![Stepping through the draws of a layer one at a time](docs/images/debug-frame.webp)
 
+### Edit transforms
+
+Click a position, rotation or the local scale in the Transform section of an entity to edit it as
+three numbers separated by commas (one number for a uniform scale); Enter applies it and Escape
+gives up. Or turn on **Move**, **Rotate** or **Scale** in the toolbar and drag the handles of the
+gizmo drawn on the selected entity. A drag on a handle is kept from the app, while away from the
+handles the app has the view as usual. Pick, Fly and Orbit are off while a gizmo is on; Esc or its
+button turns it off. An entity with a physics body takes its body along.
+
 ### Copy as JSON
 
 Right-click a row, a section title or an item of a list to copy it to the clipboard as JSON, with

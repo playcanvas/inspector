@@ -75,17 +75,69 @@ function nodeSection(node) {
 }
 
 /**
+ * @param {string} text - Numbers, separated by commas or spaces, optionally in brackets.
+ * @returns {number[]|null} The numbers, or null when any of them is not a finite number.
+ */
+function parseNumbers(text) {
+    const numbers = text.split(/[\s,;()[\]]+/).filter(Boolean).map(Number);
+    return numbers.every(Number.isFinite) ? numbers : null;
+}
+
+/**
+ * Moves the physics body of a node to where the node now is. A dynamic or kinematic body would
+ * otherwise put the node back where the body is on the next step of the simulation.
+ *
+ * @param {GraphNode} node - A node whose transform was changed.
+ */
+function syncBody(node) {
+    const body = /** @type {any} */ (node).c?.rigidbody;
+    if (body?.enabled && body.body) body.teleport(node.getPosition(), node.getRotation());
+}
+
+/**
+ * Makes a vector of a node's transform editable as its components, separated by commas. The text
+ * holds every digit of each, so a component that is not touched is set back exactly as it was.
+ *
+ * @param {Described} value - The described vector.
  * @param {GraphNode} node - The node.
- * @returns {PropertySection} The transform section.
+ * @param {import('playcanvas').Vec3} vector - The vector.
+ * @param {(x: number, y: number, z: number) => void} set - Sets it on the node.
+ * @param {boolean} [uniform] - Whether a single number sets all three components, as for a scale.
+ * @returns {Described} The value, editable.
+ */
+function editVector(value, node, vector, set, uniform = false) {
+    value.edit = {
+        text: `${vector.x}, ${vector.y}, ${vector.z}`,
+        apply: (text) => {
+            const numbers = parseNumbers(text);
+            if (uniform && numbers?.length === 1) numbers.push(numbers[0], numbers[0]);
+            if (numbers?.length !== 3) return false;
+            set(numbers[0], numbers[1], numbers[2]);
+            syncBody(node);
+            return true;
+        }
+    };
+    return value;
+}
+
+/**
+ * @param {GraphNode} node - The node.
+ * @returns {PropertySection} The transform section. Its positions, rotations and local scale are
+ * editable; the world scale only follows from the scales of the node and its ancestors.
  */
 function transformSection(node) {
     const section = makeSection('transform', 'Transform');
 
-    push(section, 'local position', describeValue(node.getLocalPosition()));
-    push(section, 'local rotation', describeValue(node.getLocalEulerAngles()));
-    push(section, 'local scale', describeValue(node.getLocalScale()));
-    push(section, 'world position', describeValue(node.getPosition()));
-    push(section, 'world rotation', describeValue(node.getEulerAngles()));
+    const localPosition = node.getLocalPosition();
+    const localRotation = node.getLocalEulerAngles();
+    const localScale = node.getLocalScale();
+    const position = node.getPosition();
+    const rotation = node.getEulerAngles();
+    push(section, 'local position', editVector(describeValue(localPosition), node, localPosition, (x, y, z) => node.setLocalPosition(x, y, z)));
+    push(section, 'local rotation', editVector(describeValue(localRotation), node, localRotation, (x, y, z) => node.setLocalEulerAngles(x, y, z)));
+    push(section, 'local scale', editVector(describeValue(localScale), node, localScale, (x, y, z) => node.setLocalScale(x, y, z), true));
+    push(section, 'world position', editVector(describeValue(position), node, position, (x, y, z) => node.setPosition(x, y, z)));
+    push(section, 'world rotation', editVector(describeValue(rotation), node, rotation, (x, y, z) => node.setEulerAngles(x, y, z)));
     push(section, 'world scale', describeValue(node.getScale()));
     push(section, 'forward', describeValue(node.forward));
 
@@ -417,5 +469,5 @@ function buildComponentModel(component) {
 
 export {
     buildComponentModel, buildNodeModel, layersValue, materialRows, materialTextures, meshInstanceRows, meshRows,
-    scriptInstanceRows, vertexFormatValue
+    scriptInstanceRows, syncBody, vertexFormatValue
 };
