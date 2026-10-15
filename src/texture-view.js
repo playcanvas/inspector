@@ -4,7 +4,7 @@ import {
 
 import { containerParts, resourceAssets } from './asset-view.js';
 import { describeValue } from './describe.js';
-import { formatBytes, formatName, makeSection, push, read, reflectRows } from './model.js';
+import { backlink, formatBytes, formatName, makeSection, push, read, reflectRows } from './model.js';
 
 /** @import { AppBase } from 'playcanvas' */
 /** @import { GraphicsDevice } from 'playcanvas' */
@@ -154,15 +154,15 @@ function buildTextureModel(texture, ctx) {
         push(general, 'from asset', describeValue(asset));
         // a texture a glb carries comes from the container that loaded it
         const container = containerParts(registry).parentOf.get(asset);
-        if (container) push(general, 'from container', describeValue(container));
+        if (container) push(general, 'from container', backlink(describeValue(container)));
     }
 
     const owners = attachmentTargets(ctx.device).get(texture) ?? [];
-    push(general, 'attached to', {
+    push(general, 'attached to', backlink({
         text: owners.length ? `${owners.length} render target${owners.length === 1 ? '' : 's'}` : 'no render target',
         cls: owners.length ? 'obj' : 'null',
         items: owners.map(rt => ({ label: '', text: rt.name || '(unnamed)', cls: 'ref', target: rt }))
-    });
+    }));
     sections.push(general);
 
     const sampling = makeSection('sampling', 'Sampling');

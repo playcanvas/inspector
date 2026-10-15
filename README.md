@@ -63,6 +63,18 @@ needs the debug build of the engine.
 
 ![Stepping through the draws of a layer one at a time](docs/images/debug-frame.webp)
 
+### Copy as JSON
+
+Right-click a row, a section title or an item of a list to copy it to the clipboard as JSON, with
+numbers at full precision. Right-click the header of a group, such as Textures on the Memory tab,
+to copy the group, or the name of a tab to copy everything it lists: the Hierarchy tab copies the
+hierarchy from its root. **Copy as JSON** copies it on its own; **Copy N levels deep** also copies
+what it links to, such as the children of an entity, its mesh instances, their materials and their
+textures, up to N links away; **Copy all levels** follows every link, so copying the root copies
+the whole hierarchy. A link that is not followed is named by `$type` and its name or id, and
+marked `$stub`; an object already copied elsewhere in the copy is marked `$ref`. A node's parent
+and the lists of what uses an object are left out, so a copy never climbs out of what was copied.
+
 ## Engine versions
 
 Each inspector release names the engine versions it supports in its `playcanvas` peer dependency.

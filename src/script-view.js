@@ -2,7 +2,7 @@ import { Script, ScriptType } from 'playcanvas';
 
 import { describeValue } from './describe.js';
 import { nodeLabel } from './memory-view.js';
-import { makeSection, push } from './model.js';
+import { makeSection, makeUsageSection, push } from './model.js';
 import { scriptInstanceRows } from './node-model.js';
 
 /** @import { AppBase } from 'playcanvas' */
@@ -228,7 +228,8 @@ function scriptListRows(survey) {
  * using it, each instance opening in place into its attributes, and its source.
  *
  * @param {Function} cls - The script class.
- * @param {{ app: AppBase }} ctx - The app.
+ * @param {{ app: AppBase, backlinks?: boolean }} ctx - The app, and whether to list the entities
+ * using the class, which a copy has no use for.
  * @returns {PropertySection[]} The sections.
  */
 function buildScriptModel(cls, ctx) {
@@ -257,8 +258,24 @@ function buildScriptModel(cls, ctx) {
         });
     }
     sections.push(general);
+    if (ctx.backlinks !== false) sections.push(instancesSection(instances));
 
-    const usage = makeSection('instances', 'Used by');
+    const source = scriptSource(cls, name);
+    const code = makeSection('source', 'Source');
+    const lines = source.split('\n').length;
+    push(code, 'source', { text: `${lines} line${lines === 1 ? '' : 's'}`, cls: 'num', code: source });
+    sections.push(code);
+
+    return sections;
+}
+
+/**
+ * @param {{ script: ScriptType|Script, entity: Entity }[]} instances - The instances of a script
+ * class, with the entities they are on.
+ * @returns {PropertySection} The section listing them, each opening in place into its attributes.
+ */
+function instancesSection(instances) {
+    const usage = makeUsageSection('instances', 'Used by');
     const running = instances.filter(({ script, entity }) => isRunning(script, entity)).length;
     push(usage, 'instances', {
         text: instances.length ? `${instances.length} instance${instances.length === 1 ? '' : 's'}, ${running} running` : 'none',
@@ -274,15 +291,7 @@ function buildScriptModel(cls, ctx) {
     if (instances.length > MAX_INSTANCES) {
         usage.rows.push({ key: 'more', label: '', value: { text: `… ${instances.length - MAX_INSTANCES} more`, cls: 'null' }, depth: 1 });
     }
-    sections.push(usage);
-
-    const source = scriptSource(cls, name);
-    const code = makeSection('source', 'Source');
-    const lines = source.split('\n').length;
-    push(code, 'source', { text: `${lines} line${lines === 1 ? '' : 's'}`, cls: 'num', code: source });
-    sections.push(code);
-
-    return sections;
+    return usage;
 }
 
 export { buildScriptModel, isScriptClass, scriptListRows, surveyScripts };

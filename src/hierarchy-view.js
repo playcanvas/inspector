@@ -277,6 +277,18 @@ class HierarchyView {
     }
 
     /**
+     * @param {Node} element - An element, such as the target of a context menu event.
+     * @returns {GraphNode|null} The node whose row it is in, or null when it is in none. The rows
+     * of a node's children are nested under its element, so only the row itself is matched.
+     */
+    nodeAt(element) {
+        for (const [node, entry] of this._entries) {
+            if (entry.row.contains(element)) return node;
+        }
+        return null;
+    }
+
+    /**
      * Selects a node, expanding its ancestors and scrolling it into view.
      *
      * @param {GraphNode|null} node - The node, or null to clear the selection.

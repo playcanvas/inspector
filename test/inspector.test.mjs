@@ -343,6 +343,175 @@ describe('Inspector', function () {
         expect(Object.keys(stored)).to.deep.equal([]);
     });
 
+    it('copies what a right click is on as JSON, and keeps how deep a deep copy goes', async function () {
+        const stored = {};
+        Object.defineProperty(window, 'localStorage', {
+            configurable: true,
+            value: {
+                getItem: key => stored[key] ?? null,
+                setItem: (key, value) => {
+                    stored[key] = value;
+                }
+            }
+        });
+        let written = null;
+        Object.defineProperty(window.navigator, 'clipboard', {
+            configurable: true,
+            value: {
+                writeText: (text) => {
+                    written = text;
+                    return Promise.resolve();
+                }
+            }
+        });
+
+        const crate = new GraphNode('crate');
+        crate.setLocalPosition(1.23456789, 0, 0);
+        const lid = new GraphNode('lid');
+        const hinge = new GraphNode('hinge');
+        app.root.addChild(crate);
+        crate.addChild(lid);
+        lid.addChild(hinge);
+
+        const inspector = /** @type {any} */ (new Inspector(app, { storageKey: 'test-copy' }));
+        const root = panel(inspector);
+        const menu = root.querySelector('.pci-menu');
+        const rightClick = (target) => {
+            const event = new window.MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true, clientX: 20, clientY: 30 });
+            target.dispatchEvent(event);
+            return event;
+        };
+        const labels = () => [...root.querySelectorAll('.pci-menu-label')].map(label => label.textContent);
+        const choose = async (text) => {
+            [...root.querySelectorAll('.pci-menu-item')].find(item => item.textContent.startsWith(text)).click();
+            await Promise.resolve();
+            await Promise.resolve();
+        };
+
+        // a row of the hierarchy is selected, as a click would, and its node is copied
+        const row = [...root.querySelectorAll('.pci-row')].find(r => r.querySelector('.pci-name').textContent === 'crate');
+        expect(rightClick(row).defaultPrevented).to.be.true;
+        expect(inspector._selected).to.equal(crate);
+        expect(menu.style.display).to.equal('block');
+        expect(root.querySelector('.pci-menu-title').textContent).to.equal('GraphNode "crate"');
+        expect(labels()).to.deep.equal(['Copy as JSON', 'Copy 3 levels deep', 'Copy all levels']);
+
+        await choose('Copy as JSON');
+        expect(menu.style.display).to.equal('none');
+        // values keep their precision, and a list of numbers stays on one line
+        expect(written).to.include('"local position": [1.23456789, 0, 0]');
+        const alone = JSON.parse(written);
+        expect(alone.$type).to.equal('GraphNode');
+        expect(alone.GraphNode).to.not.have.property('parent');
+        expect(alone.children).to.deep.equal([{ $type: 'GraphNode', name: 'lid', path: 'crate/lid', $stub: true }]);
+        expect(root.querySelector('.pci-toast').textContent).to.match(/^Copied 1 object, \d+ B$/);
+
+        // the buttons of the deep copy change how far it goes without closing the menu
+        rightClick(row);
+        const [less, more] = root.querySelectorAll('.pci-menu-button');
+        less.click();
+        less.click();
+        expect(labels()[1]).to.equal('Copy 1 level deep');
+        expect(less.disabled).to.be.true;
+        expect(more.disabled).to.be.false;
+        expect(menu.style.display).to.equal('block');
+        await choose('Copy 1 level deep');
+        const one = JSON.parse(written);
+        expect(one.children[0].GraphNode.name).to.equal('lid');
+        expect(one.children[0].children[0].$stub).to.be.true;
+
+        rightClick(row);
+        await choose('Copy all levels');
+        expect(JSON.parse(written).children[0].children[0].GraphNode.name).to.equal('hinge');
+
+        // a row of the property view copies its value, and a section title its section
+        const position = [...root.querySelectorAll('.pci-prop')].find(r => r.querySelector('.pci-label').textContent === 'local position');
+        rightClick(position.querySelector('.pci-value'));
+        expect(root.querySelector('.pci-menu-title').textContent).to.equal('local position: (1.2346, 0, 0)');
+        await choose('Copy as JSON');
+        expect(JSON.parse(written)).to.deep.equal({ 'local position': [1.23456789, 0, 0] });
+
+        const transform = [...root.querySelectorAll('.pci-section-title')].find(title => title.textContent === 'Transform');
+        rightClick(transform);
+        await choose('Copy as JSON');
+        expect(Object.keys(JSON.parse(written))).to.deep.equal(['Transform']);
+
+        // Escape closes the menu, and a text field keeps the browser's own menu, to paste into it
+        rightClick(transform);
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+        expect(menu.style.display).to.equal('none');
+        expect(rightClick(inspector._filterInput).defaultPrevented).to.be.false;
+        expect(menu.style.display).to.equal('none');
+
+        inspector.destroy();
+        const second = /** @type {any} */ (new Inspector(app, { storageKey: 'test-copy' }));
+        expect(second._copyDepth).to.equal(1);
+        second.destroy();
+    });
+
+    it('copies everything a tab lists, or one group of it, from a right click on its name', async function () {
+        let written = null;
+        Object.defineProperty(window.navigator, 'clipboard', {
+            configurable: true,
+            value: {
+                writeText: (text) => {
+                    written = text;
+                    return Promise.resolve();
+                }
+            }
+        });
+        app.root.addChild(new GraphNode('crate'));
+        const texture = new Texture(app.graphicsDevice, { name: 'albedo', width: 4, height: 4 });
+        // the WebGL and WebGPU devices register their textures; the null device does not
+        app.graphicsDevice.textures.add(texture);
+        const mesh = new Mesh(app.graphicsDevice);
+        mesh.setPositions([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+        mesh.update();
+
+        const inspector = /** @type {any} */ (new Inspector(app));
+        const root = panel(inspector);
+        const rightClick = target => target.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true }));
+        const title = () => root.querySelector('.pci-menu-title').textContent;
+        const choose = async (text) => {
+            [...root.querySelectorAll('.pci-menu-item')].find(item => item.textContent.startsWith(text)).click();
+            await Promise.resolve();
+        };
+        const tab = name => [...root.querySelectorAll('.pci-tab')].find(button => button.textContent === name);
+
+        // a tab opens, the way a click opens it, and every group of its list is copied
+        rightClick(tab('Memory'));
+        expect(inspector._tab).to.equal('memory');
+        expect(title()).to.equal('Memory');
+        await choose('Copy as JSON');
+        const memory = JSON.parse(written).Memory;
+        expect(Object.keys(memory)).to.include.members(['Textures', 'Vertex buffers']);
+        // the textures, which the Memory tab only counts, are copied with their group
+        expect(memory.Textures.count).to.be.a('string');
+        expect(memory.Textures.entries.map(entry => entry.Texture?.name)).to.include('albedo');
+        expect(memory['Vertex buffers'].entries[0].$type).to.equal('VertexBuffer');
+
+        // the header of a group copies the group, and leaves it open or closed as it was
+        const header = [...root.querySelectorAll('.pci-lrow-header')].find(row => row.firstChild.textContent === 'Vertex buffers');
+        const open = header.classList.contains('pci-open');
+        rightClick(header);
+        expect(title()).to.equal('Vertex buffers');
+        await choose('Copy as JSON');
+        expect(Object.keys(JSON.parse(written))).to.deep.equal(['Vertex buffers']);
+        expect(header.classList.contains('pci-open')).to.equal(open);
+
+        // the hierarchy tab copies the hierarchy, from its root
+        rightClick(tab('Hierarchy'));
+        expect(inspector._tab).to.equal('hierarchy');
+        await choose('Copy all levels');
+        const hierarchy = JSON.parse(written);
+        expect(hierarchy.GraphNode.name).to.equal('root');
+        expect(hierarchy.children.map(child => child.GraphNode.name)).to.deep.equal(['crate']);
+
+        inspector.destroy();
+        mesh.destroy();
+        texture.destroy();
+    });
+
     it('resolves a component asset id to a linked asset and opens it on the assets tab', function () {
         const inspector = /** @type {any} */ (new Inspector(app));
         const texture = new Asset('bricks', 'texture', { url: 'bricks.png', size: 2048 });
