@@ -11,8 +11,9 @@ the core of a browser extension that finds PlayCanvas apps on any page.
 - **Only public engine exports.** If something the inspector needs is not exported, recognize it by
   shape or reach it through a live object; do not ask the engine to export it for us. The engine
   carries nothing for the inspector except the devtools hook (see README).
-- **Read-only by default.** The inspector may toggle entities, pause and step the app, and apply
-  view-only overrides (render modes, wireframe, a flown camera) that it removes when it closes.
+- **Read-only by default.** The inspector may toggle entities, edit the transforms of entities (in
+  the Transform section and with its gizmos), pause and step the app, and apply view-only overrides
+  (render modes, wireframe, a flown camera, a gizmo and its layer) that it removes when it closes.
   Nothing else changes the app.
 - **No module side effects** (`"sideEffects": false`): no top-level calls, globals or registrations.
 - **Copied engine helpers** (`src/renderers`, `src/picker`, `src/input`): keep them close to the

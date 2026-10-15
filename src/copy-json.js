@@ -22,6 +22,8 @@ import { collectProperties, describeValue } from './describe.js';
  * the app and its device, through which everything else could be reached.
  * @property {number} [maxObjects] - How many objects are copied in full before the rest are only
  * referenced, so that copying a huge scene cannot stall the page for long.
+ * @property {(object: object) => boolean} [exclude] - Whether a child node belongs to the panel
+ * rather than the app, such as the entity of its gizmo, and is left out with everything below it.
  */
 
 /**
@@ -176,6 +178,12 @@ class JsonCopy {
     _maxObjects;
 
     /**
+     * @type {(object: object) => boolean}
+     * @private
+     */
+    _exclude;
+
+    /**
      * The objects copied in full so far, so that the next mention of one is a reference.
      *
      * @type {Set<object>}
@@ -213,6 +221,7 @@ class JsonCopy {
         this._modelFor = options.modelFor ?? (() => null);
         this._opaque = options.opaque ?? (() => false);
         this._maxObjects = options.maxObjects ?? MAX_OBJECTS;
+        this._exclude = options.exclude ?? (() => false);
     }
 
     /**
@@ -269,7 +278,7 @@ class JsonCopy {
             Object.assign(out, this.rows(/** @type {PropertyRow[]} */ (content), level));
         }
         if (obj instanceof GraphNode) {
-            out.children = obj.children.map(child => this.object(child, level + 1));
+            out.children = obj.children.filter(child => !this._exclude(child)).map(child => this.object(child, level + 1));
         }
         return out;
     }

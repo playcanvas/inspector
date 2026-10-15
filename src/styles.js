@@ -29,7 +29,10 @@ const ICONS = {
     fly: '<path d="m16 13 5.22 3.48a.5.5 0 0 0 .78-.42V7.87a.5.5 0 0 0-.75-.43L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
     popout: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
     dock: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/>',
-    close: '<path d="M18 6 6 18M6 6l12 12"/>'
+    close: '<path d="M18 6 6 18M6 6l12 12"/>',
+    translate: '<path d="M12 3v18M3 12h18"/><path d="m9 6 3-3 3 3"/><path d="m9 18 3 3 3-3"/><path d="m6 9-3 3 3 3"/><path d="m18 9 3 3-3 3"/>',
+    rotate: '<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3v4h-4"/>',
+    scale: '<rect x="3" y="11" width="10" height="10" rx="1"/><path d="m13 11 8-8"/><path d="M15 3h6v6"/>'
 };
 
 /**
@@ -933,6 +936,45 @@ ${ICON_RULES}
     .pci-v-obj  { color: #dcdcaa; }
     .pci-v-ref  { color: #4fc1ff; }
     .pci-v-err  { color: #f14c4c; }
+
+    /* an editable value reads as a text field, and its editor opens in the same place at the same size */
+    .pci-prop.pci-editable .pci-value {
+        box-sizing: border-box;
+        margin: -1px 0;
+        padding: 0 4px;
+        cursor: text;
+        background: var(--pci-input);
+        border: 1px solid var(--pci-border-strong);
+        border-radius: 3px;
+    }
+
+    .pci-prop.pci-editable .pci-value:hover {
+        border-color: var(--pci-text-muted);
+    }
+
+    .pci-prop.pci-editing .pci-value {
+        margin: 0;
+        padding: 0;
+        background: none;
+        border: none;
+    }
+
+    .pci-edit {
+        box-sizing: border-box;
+        width: 100%;
+        margin: -1px 0;
+        padding: 0 4px;
+        font: inherit;
+        color: var(--pci-text);
+        background: var(--pci-input);
+        border: 1px solid var(--pci-accent);
+        border-radius: 3px;
+        outline: none;
+    }
+
+    .pci-edit.pci-invalid {
+        border-color: #f14c4c;
+    }
 
     .pci-link {
         cursor: pointer;

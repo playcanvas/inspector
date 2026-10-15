@@ -38,6 +38,8 @@ import { setTip } from './tooltip.js';
  * @property {HTMLElement} caretEl - The caret of a row that expands, its own click target.
  * @property {(() => void)|null} select - What clicking the row chooses, kept current each refresh.
  * @property {PropertyRow|null} row - The row last rendered, which a copy of it is made from.
+ * @property {Described['edit']|null} edit - The edit of the value, kept current each refresh.
+ * @property {HTMLInputElement|null} editEl - The text field the value is edited in, while it is.
  */
 
 /**
@@ -49,6 +51,9 @@ import { setTip } from './tooltip.js';
  * @property {Map<string, RowElements>} rows - The rows by key.
  * @property {PropertySection|null} section - The section last rendered, which a copy of it is made from.
  */
+
+// the tooltip of an editable value
+const EDIT_TIP = 'Click to edit. Enter applies, Esc cancels';
 
 // where the first indent guide sits, and how far apart the levels are, in CSS pixels
 const INDENT_BASE = 8;
@@ -413,7 +418,13 @@ class PropertyView {
             const expanded = expandable && this._expanded.has(`${section.key}\0${row.key}`);
             const caret = expandable ? `${expanded ? '▾' : '▸'} ` : '';
             if (elements.caretEl.textContent !== caret) elements.caretEl.textContent = caret;
-            if (elements.text !== text) {
+            elements.edit = row.value.edit ?? null;
+            elements.el.classList.toggle('pci-editable', !!elements.edit);
+            const tip = elements.edit ? EDIT_TIP : '';
+            if ((elements.valueEl.dataset.tip ?? '') !== tip) setTip(elements.valueEl, tip);
+            if (elements.editEl && !elements.edit) this._endEdit(elements);
+            // the text field being typed in is left alone until it is done with
+            if (elements.text !== text && !elements.editEl) {
                 elements.text = text;
                 elements.valueEl.lastChild.textContent = text;
             }
@@ -655,7 +666,9 @@ class PropertyView {
             actions: null,
             caretEl: el('span', 'pci-caret'),
             select: null,
-            row: null
+            row: null,
+            edit: null,
+            editEl: null
         };
         this._byElement.set(elements.el, elements);
         elements.valueEl.append(elements.caretEl, document.createTextNode(''));
@@ -666,6 +679,8 @@ class PropertyView {
         });
         elements.valueEl.addEventListener('pointerleave', () => this.onHover?.(null, null));
         elements.el.addEventListener('click', (e) => {
+            // a click in the open text field is the field's own
+            if (elements.editEl) return;
             const expandable = elements.el.classList.contains('pci-expandable');
             const toggle = () => {
                 const key = `${section.key}\0${row.key}`;
@@ -674,8 +689,10 @@ class PropertyView {
                 this.refresh();
             };
             // the caret always opens; elsewhere a choice wins over a link, and a link over opening,
-            // which only the value reacts to
-            if (expandable && e.target === elements.caretEl) {
+            // which only the value reacts to. An editable value opens its text field
+            if (elements.edit && elements.valueEl.contains(/** @type {Node} */ (e.target))) {
+                this._startEdit(elements);
+            } else if (expandable && e.target === elements.caretEl) {
                 toggle();
             } else if (elements.select) {
                 elements.select();
@@ -690,6 +707,75 @@ class PropertyView {
         });
         section.rows.set(row.key, elements);
         return elements;
+    }
+
+    /**
+     * Opens the text field of an editable value. Enter hands the text to the edit and closes the
+     * field once the edit takes it, or marks the text as not taken; leaving the field does the
+     * same, and gives up on text that is not taken; Escape closes it without a change.
+     *
+     * @param {RowElements} elements - The row.
+     * @private
+     */
+    _startEdit(elements) {
+        const start = elements.edit?.text;
+        if (start === undefined) return;
+
+        const input = /** @type {HTMLInputElement} */ (el('input', 'pci-edit'));
+        input.type = 'text';
+        input.spellcheck = false;
+        input.value = start;
+        elements.valueEl.lastChild.textContent = '';
+        elements.text = '';
+        elements.valueEl.appendChild(input);
+        elements.editEl = input;
+        elements.el.classList.add('pci-editing');
+
+        /**
+         * @param {boolean} commit - Whether to hand the text to the edit.
+         * @returns {boolean} Whether the field closed.
+         */
+        const finish = (commit) => {
+            if (elements.editEl !== input) return true;
+            // an untouched field changes nothing, as its text is only what the value read when it opened
+            if (commit && input.value !== start && !elements.edit?.apply(input.value)) {
+                input.classList.add('pci-invalid');
+                return false;
+            }
+            this._endEdit(elements);
+            this.refresh();
+            return true;
+        };
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                finish(true);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                finish(false);
+            }
+        });
+        input.addEventListener('input', () => input.classList.remove('pci-invalid'));
+        input.addEventListener('blur', () => {
+            if (!finish(true)) finish(false);
+        });
+        input.focus();
+        input.select();
+    }
+
+    /**
+     * Closes the text field of a value, which shows its text again on the next refresh.
+     *
+     * @param {RowElements} elements - The row.
+     * @private
+     */
+    _endEdit(elements) {
+        const input = elements.editEl;
+        if (!input) return;
+        elements.editEl = null;
+        elements.el.classList.remove('pci-editing');
+        input.remove();
     }
 }
 

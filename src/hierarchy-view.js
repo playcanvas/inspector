@@ -126,6 +126,14 @@ class HierarchyView {
     isLocked = () => false;
 
     /**
+     * Decides which nodes are left out of the tree, with everything below them, such as the
+     * entity of a gizmo the panel adds to the hierarchy. Defaults to none.
+     *
+     * @type {(node: GraphNode) => boolean}
+     */
+    isHidden = () => false;
+
+    /**
      * The root of the rendered hierarchy.
      *
      * @type {GraphNode|null}
@@ -230,7 +238,9 @@ class HierarchyView {
         this.nodeCount++;
         if (node instanceof Entity) this.entityCount++;
         let below = 0;
-        for (const child of node.children) below += 1 + this._countSubtree(child);
+        for (const child of node.children) {
+            if (!this.isHidden(child)) below += 1 + this._countSubtree(child);
+        }
         this._descendants.set(node, below);
         return below;
     }
@@ -381,14 +391,18 @@ class HierarchyView {
 
         // children are materialized only when shown, or when a filter needs to match them
         const children = node.children;
-        const childCount = children.length;
+        let childCount = 0;
+        for (const child of children) {
+            if (!this.isHidden(child)) childCount++;
+        }
         const expanded = this._expanded.has(node);
         let anyChildMatch = false;
 
         if (childCount > 0 && (expanded || filter)) {
             let cursor = entry.childrenEl.firstChild;
-            for (let i = 0; i < childCount; i++) {
+            for (let i = 0; i < children.length; i++) {
                 const child = children[i];
+                if (this.isHidden(child)) continue;
                 if (this._visit(child, depth + 1, filter)) anyChildMatch = true;
                 const childEl = this._entries.get(child).el;
                 if (childEl !== cursor) {

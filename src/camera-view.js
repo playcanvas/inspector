@@ -17,6 +17,7 @@ import { RENDER_MODES, isScreenCamera } from './viewport-tools.js';
  * @typedef {object} CameraActions
  * @property {(camera: CameraComponent) => void} fly - Flies the camera.
  * @property {CameraComponent|null} flying - The camera being flown, if any.
+ * @property {string|null} [unavailable] - Why no camera can be flown now, such as a gizmo being on.
  * @ignore
  */
 
@@ -96,13 +97,14 @@ function buildCameraModel(camera, ctx) {
     const general = makeSection('camera', `Camera "${entity.name}"`);
     push(general, 'entity', describeValue(entity));
     push(general, 'enabled', { text: String(camera.enabled && entity.enabled), cls: 'bool' });
+    const unavailable = cameraActions.unavailable ?? null;
     push(general, 'fly', {
-        text: camera === cameraActions.flying ? 'flying now, Esc to stop' : 'fly it with the mouse and WASD',
+        text: camera === cameraActions.flying ? 'flying now, Esc to stop' : (unavailable ?? 'fly it with the mouse and WASD'),
         cls: 'obj',
         actions: [{
             text: camera === cameraActions.flying ? 'Flying' : 'Fly',
-            title: 'Fly this camera: WASD and QE move, drag to look, the wheel sets the speed, Shift is faster, Esc stops',
-            disabled: camera === cameraActions.flying,
+            title: unavailable ?? 'Fly this camera: WASD and QE move, drag to look, the wheel sets the speed, Shift is faster, Esc stops',
+            disabled: camera === cameraActions.flying || !!unavailable,
             run: () => cameraActions.fly(camera)
         }]
     });
