@@ -673,6 +673,19 @@ describe('Inspector', function () {
         expect(row('c:light', 'layers').text).to.equal('[]');
         entity.c.light = /** @type {any} */ ({ enabled: true, system: { app } });
         expect(section('c:light').rows.map(r => r.label)).to.not.include('layers');
+
+        // the layers of an anim component are its animation layers, not ids, and are listed as they are
+        class AnimComponentLayer {
+            constructor(name) {
+                this.name = name;
+            }
+        }
+        entity.c.anim = /** @type {any} */ ({ enabled: true, system: { app }, layers: [new AnimComponentLayer('Base')] });
+        const animLayers = row('c:anim', 'layers');
+        expect(animLayers.text).to.equal('Array(1) of AnimComponentLayer');
+        expect(animLayers.items.map(item => item.text)).to.deep.equal(['AnimComponentLayer']);
+        expect(animLayers.text).to.not.include('not in the composition');
+        expect(section('c:anim').rows.filter(r => r.label === 'layers')).to.have.lengthOf(1);
     });
 
     it('lists mesh instances that open into their properties, linking their mesh and material', function () {

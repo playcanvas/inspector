@@ -157,9 +157,10 @@ function componentSection(name, component) {
 
     const handled = [...SKIP_COMPONENT, ...assetProperties];
 
-    // layer ids, named from the composition they belong to
+    // layer ids, named from the composition they belong to. Other lists called layers, such as the
+    // animation layers of an anim component, are shown like any other property
     const layers = /** @type {any} */ (component).layers;
-    if (Array.isArray(layers)) {
+    if (Array.isArray(layers) && layers.every(id => typeof id === 'number')) {
         const composition = /** @type {any} */ (component).system?.app?.scene?.layers ?? null;
         push(section, 'layers', layersValue(layers, composition));
         handled.push('layers');
