@@ -1,8 +1,20 @@
+import { copyRow, copySection, copySubject } from './copy-json.js';
+import { describeValue } from './describe.js';
 import { INDENT_COLORS } from './styles.js';
 import { setTip } from './tooltip.js';
 
+/** @import { CopyOptions, CopyResult } from './copy-json.js' */
 /** @import { Described } from './describe.js' */
 /** @import { PropertyRow, PropertySection } from './model.js' */
+
+/**
+ * Something a context menu of the panel can copy.
+ *
+ * @typedef {object} CopyTarget
+ * @ignore
+ * @property {string} title - What is copied, as the menu names it.
+ * @property {(options: CopyOptions) => CopyResult} copy - Makes the copy.
+ */
 
 /**
  * @typedef {object} RowElements
@@ -25,6 +37,7 @@ import { setTip } from './tooltip.js';
  * @property {Described['actions']|null} actions - The actions the buttons run, kept current each refresh.
  * @property {HTMLElement} caretEl - The caret of a row that expands, its own click target.
  * @property {(() => void)|null} select - What clicking the row chooses, kept current each refresh.
+ * @property {PropertyRow|null} row - The row last rendered, which a copy of it is made from.
  */
 
 /**
@@ -34,6 +47,7 @@ import { setTip } from './tooltip.js';
  * @property {HTMLElement} titleEl - The clickable title.
  * @property {HTMLElement} rowsEl - The container the rows live in.
  * @property {Map<string, RowElements>} rows - The rows by key.
+ * @property {PropertySection|null} section - The section last rendered, which a copy of it is made from.
  */
 
 // where the first indent guide sits, and how far apart the levels are, in CSS pixels
@@ -187,6 +201,14 @@ class PropertyView {
     _emptyEl = null;
 
     /**
+     * The rows and sections by the elements showing them, to find what a menu was opened on.
+     *
+     * @type {WeakMap<Element, RowElements|SectionElements>}
+     * @private
+     */
+    _byElement = new WeakMap();
+
+    /**
      * @param {HTMLElement} container - The element to render into.
      * @param {(target: *) => void} onSelect - The value link callback.
      */
@@ -253,6 +275,45 @@ class PropertyView {
     }
 
     /**
+     * What a copy made from an element of the panel copies: the row or the section title the
+     * element is in, and anywhere else the subject itself.
+     *
+     * @param {Node} node - The element, such as the target of a context menu event.
+     * @returns {CopyTarget|null} What to copy, or null when the element is not in the panel or
+     * nothing is shown.
+     */
+    copyTargetAt(node) {
+        if (!this.container.contains(node)) return null;
+        // the node type rather than instanceof, as the element may come from another window's realm
+        let element = node.nodeType === 1 ? /** @type {Element} */ (node) : node.parentElement;
+        for (; element && element !== this.container; element = element.parentElement) {
+            const found = this._byElement.get(element);
+            if (!found) continue;
+            if ('row' in found && found.row) {
+                const row = found.row;
+                const text = row.value.text;
+                return { title: row.label ? `${row.label}: ${text}` : text, copy: options => copyRow(row, options) };
+            }
+            if ('section' in found && found.section) {
+                const section = found.section;
+                return { title: section.title, copy: options => copySection(section, options) };
+            }
+        }
+        return this.subjectCopyTarget();
+    }
+
+    /**
+     * @returns {CopyTarget|null} A copy of the subject, rebuilt when it is made so it reads the
+     * live object, or null when nothing is shown.
+     */
+    subjectCopyTarget() {
+        const subject = this._subject;
+        const buildModel = this._buildModel;
+        if (!subject || !buildModel) return null;
+        return { title: describeValue(subject, 1).text, copy: options => copySubject(subject, buildModel(subject), options) };
+    }
+
+    /**
      * Re-reads every shown property and updates the text that changed.
      */
     refresh() {
@@ -280,6 +341,7 @@ class PropertyView {
 
         for (const section of model) {
             const elements = this._sections.get(section.key) ?? this._createSection(section);
+            elements.section = section;
             seen.add(section.key);
 
             if (elements.titleEl.textContent !== section.title) {
@@ -317,6 +379,7 @@ class PropertyView {
 
         for (const row of this._flatten(section.key, rows, 0, '')) {
             const elements = section.rows.get(row.key) ?? this._createRow(section, row);
+            elements.row = row;
             seen.add(row.key);
 
             if (elements.labelEl.textContent !== row.label) {
@@ -523,6 +586,7 @@ class PropertyView {
 
         if (!elements.codeEl) {
             elements.codeEl = el('pre', 'pci-code');
+            this._byElement.set(elements.codeEl, elements);
             elements.code = '';
             section.rowsEl.insertBefore(elements.codeEl, elements.el.nextSibling);
         }
@@ -550,9 +614,11 @@ class PropertyView {
             el: el('div', 'pci-section'),
             titleEl: el('div', 'pci-section-title'),
             rowsEl: el('div', 'pci-rows'),
-            rows: new Map()
+            rows: new Map(),
+            section: null
         };
         elements.el.append(elements.titleEl, elements.rowsEl);
+        this._byElement.set(elements.titleEl, elements);
         if (section.collapsed) this._collapsed.add(section.key);
         elements.titleEl.addEventListener('click', () => {
             if (this._collapsed.has(section.key)) this._collapsed.delete(section.key);
@@ -588,8 +654,10 @@ class PropertyView {
             actionsSignature: '',
             actions: null,
             caretEl: el('span', 'pci-caret'),
-            select: null
+            select: null,
+            row: null
         };
+        this._byElement.set(elements.el, elements);
         elements.valueEl.append(elements.caretEl, document.createTextNode(''));
         elements.el.append(elements.labelEl, elements.valueEl);
         // the whole row takes the click, so a choice can be made anywhere on it

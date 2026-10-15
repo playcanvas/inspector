@@ -4,7 +4,7 @@ import {
 
 import { pushAssetRows } from './asset-view.js';
 import { collectProperties, describeValue } from './describe.js';
-import { formatBytes, makeSection, push, pushRow, read, reflectInto, reflectRows } from './model.js';
+import { backlink, formatBytes, makeSection, push, pushRow, read, reflectInto, reflectRows } from './model.js';
 
 /** @import { LayerComposition } from 'playcanvas' */
 /** @import { Material } from 'playcanvas' */
@@ -68,7 +68,7 @@ function nodeSection(node) {
     push(section, 'enabled in hierarchy', describeValue(node.enabled));
     push(section, 'tags', describeValue(node.tags.list()));
     push(section, 'path', describeValue(node.path));
-    push(section, 'parent', describeValue(node.parent));
+    push(section, 'parent', backlink(describeValue(node.parent)));
     push(section, 'children', describeValue(node.children.length));
 
     return section;
@@ -401,4 +401,21 @@ function buildNodeModel(node) {
     return sections;
 }
 
-export { buildNodeModel, layersValue, materialRows, materialTextures, meshInstanceRows, meshRows, scriptInstanceRows, vertexFormatValue };
+/**
+ * The sections a component shows under its entity, for a component reached on its own, such as
+ * through a link.
+ *
+ * @param {Component} component - The component.
+ * @returns {PropertySection[]} Its section, followed by one per script instance of a script component.
+ */
+function buildComponentModel(component) {
+    const name = /** @type {any} */ (component).system?.id ?? component.constructor.name;
+    const sections = [componentSection(name, component)];
+    if (name === 'script') sections.push(...scriptSections(/** @type {any} */ (component)));
+    return sections;
+}
+
+export {
+    buildComponentModel, buildNodeModel, layersValue, materialRows, materialTextures, meshInstanceRows, meshRows,
+    scriptInstanceRows, vertexFormatValue
+};

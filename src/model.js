@@ -25,6 +25,8 @@ import { collectProperties, describeValue } from './describe.js';
  * @property {string} title - The title.
  * @property {PropertyRow[]} rows - The rows.
  * @property {boolean} [collapsed] - Whether the section starts out collapsed.
+ * @property {boolean} [backlink] - Whether the section lists what uses the subject, which copies
+ * leave out, see {@link Described#backlink}.
  */
 
 /**
@@ -35,6 +37,26 @@ import { collectProperties, describeValue } from './describe.js';
  */
 function makeSection(key, title, collapsed = false) {
     return { key, title, rows: [], collapsed };
+}
+
+/**
+ * @param {string} key - The section key.
+ * @param {string} title - The section title.
+ * @returns {PropertySection} An empty section listing what uses the subject, which copies leave out.
+ */
+function makeUsageSection(key, title) {
+    return { key, title, rows: [], collapsed: false, backlink: true };
+}
+
+/**
+ * Marks a value as referring back to what holds or uses the subject, which copies leave out.
+ *
+ * @param {Described} value - The value.
+ * @returns {Described} The same value.
+ */
+function backlink(value) {
+    value.backlink = true;
+    return value;
 }
 
 /**
@@ -165,6 +187,6 @@ function renderTargetSummary(rt, device) {
 }
 
 export {
-    attachmentsText, formatBytes, formatName, makeSection, passDisplayName, push, pushRow, read, reflectInto,
-    reflectRows, renderTargetSummary
+    attachmentsText, backlink, formatBytes, formatName, makeSection, makeUsageSection, passDisplayName, push, pushRow,
+    read, reflectInto, reflectRows, renderTargetSummary
 };

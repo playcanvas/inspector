@@ -3,7 +3,7 @@ import {
 } from 'playcanvas';
 
 import { describeValue } from './describe.js';
-import { attachmentsText, formatName, makeSection, passDisplayName, push, read, reflectRows } from './model.js';
+import { attachmentsText, backlink, formatName, makeSection, passDisplayName, push, read, reflectRows } from './model.js';
 
 /** @import { GraphicsDevice } from 'playcanvas' */
 /** @import { RenderTarget } from 'playcanvas' */
@@ -141,11 +141,11 @@ function buildRenderTargetModel(rt, ctx) {
     push(general, 'initialized', read(rt, 'initialized'));
 
     const uses = frame?.usage.get(rt) ?? [];
-    push(general, 'used by', {
+    push(general, 'used by', backlink({
         text: uses.length ? `${uses.length} pass${uses.length === 1 ? '' : 'es'} this frame` : 'no pass this frame',
         cls: uses.length ? 'obj' : 'null',
         items: uses.map(entry => ({ label: `#${entry.index}`, text: passDisplayName(entry.pass), cls: 'ref', target: entry.pass }))
-    });
+    }));
     sections.push(general);
 
     const attachments = makeSection('attachments', 'Attachments');

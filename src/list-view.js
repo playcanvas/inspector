@@ -43,6 +43,8 @@ const GUTTER_GAP = 2;
  * remembers its state across refreshes.
  * @property {boolean} [inert] - Whether the row only shows information: clicking it selects
  * nothing.
+ * @property {() => object[]} [contents] - For a header whose group does not list what it counts,
+ * the objects a copy of the group holds, such as the textures on the device.
  */
 
 /**
@@ -208,6 +210,15 @@ class ListView {
     }
 
     /**
+     * The rows, all of them, whatever the filter shows and whichever groups are open.
+     *
+     * @type {ListRow[]}
+     */
+    get rows() {
+        return this._rows;
+    }
+
+    /**
      * The item of the selected row, or null when nothing is selected or the row is gone.
      *
      * @type {*}
@@ -266,6 +277,17 @@ class ListView {
         }
         this.select(this._rows[index].key);
         return true;
+    }
+
+    /**
+     * @param {Node} node - An element, such as the target of a context menu event.
+     * @returns {ListRow|null} The row it is in, a header included, or null when it is in none.
+     */
+    rowAt(node) {
+        for (const entry of this._entries.values()) {
+            if (entry.el.contains(node)) return entry.row;
+        }
+        return null;
     }
 
     /**

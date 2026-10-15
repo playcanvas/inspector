@@ -3,7 +3,7 @@ import { Mesh, VertexBuffer } from 'playcanvas';
 import { describeValue } from './describe.js';
 import { collectMeshInstances } from './instance-survey.js';
 import { nodeLabel } from './memory-view.js';
-import { formatBytes, makeSection, push } from './model.js';
+import { formatBytes, makeSection, makeUsageSection, push } from './model.js';
 import { meshInstanceRows, meshRows } from './node-model.js';
 
 /** @import { AppBase } from 'playcanvas' */
@@ -200,17 +200,18 @@ function meshNote(survey) {
  * format, and what uses it, with each mesh instance opening in place.
  *
  * @param {Mesh} mesh - The mesh.
- * @param {{ app: AppBase }} ctx - The app, to find the mesh's users.
+ * @param {{ app: AppBase, backlinks?: boolean }} ctx - The app, to find the mesh's users, and
+ * whether to find them at all, which a copy has no use for.
  * @returns {PropertySection[]} The sections.
  */
 function buildMeshModel(mesh, ctx) {
-    const users = surveyMeshes(ctx.app).users.get(mesh) ?? [];
-
     const general = makeSection('mesh', `Mesh #${mesh.id}`);
     push(general, 'size', { text: formatBytes(meshBytes(mesh)), cls: 'num' });
     general.rows.push(...meshRows(mesh));
+    if (ctx.backlinks === false) return [general];
 
-    const usage = makeSection('users', 'Used by');
+    const users = surveyMeshes(ctx.app).users.get(mesh) ?? [];
+    const usage = makeUsageSection('users', 'Used by');
     const instances = instanceCount(users);
     push(usage, 'users', {
         text: users.length ?

@@ -1,7 +1,7 @@
 import { Asset } from 'playcanvas';
 
 import { collectProperties, describeValue } from './describe.js';
-import { formatBytes, makeSection, push, read, reflectRows } from './model.js';
+import { backlink, formatBytes, makeSection, makeUsageSection, push, read, reflectRows } from './model.js';
 
 /** @import { AppBase } from 'playcanvas' */
 /** @import { AssetRegistry } from 'playcanvas' */
@@ -103,12 +103,9 @@ function assetPropertyNames(component) {
  */
 function describeAssetValue(value, registry) {
     if (Array.isArray(value)) {
+        if (!value.length) return describeValue(value);
         const items = value.map((entry, i) => ({ label: `[${i}]`, ...describeAssetValue(entry, registry) }));
-        return {
-            text: value.length ? `Array(${value.length}) of asset` : '[]',
-            cls: value.length ? 'obj' : 'null',
-            items: value.length ? items : undefined
-        };
+        return { text: `Array(${value.length}) of asset`, cls: 'obj', items };
     }
     if (typeof value === 'number') {
         const asset = registry?.get(value) ?? null;
@@ -292,7 +289,8 @@ function assetRows(registry, sort) {
  * into (linked), the components using it (linked), and every other public property.
  *
  * @param {Asset} asset - The asset.
- * @param {{ app: AppBase }} ctx - The app, to find the asset's users.
+ * @param {{ app: AppBase, backlinks?: boolean }} ctx - The app, to find the asset's users, and
+ * whether to find them at all, which a copy has no use for.
  * @returns {PropertySection[]} The sections.
  */
 function buildAssetModel(asset, ctx) {
@@ -305,7 +303,7 @@ function buildAssetModel(asset, ctx) {
     push(general, 'type', { text: asset.type, cls: 'obj' });
     const { parentOf, parts } = containerParts(ctx.app?.assets ?? null);
     const container = parentOf.get(asset) ?? null;
-    if (container) push(general, 'container', describeValue(container));
+    if (container) push(general, 'container', backlink(describeValue(container)));
     push(general, 'state', { text: stateName(asset), cls: asset.loaded ? 'bool' : 'null' });
     push(general, 'preload', read(asset, 'preload'));
     if (container) {
@@ -343,8 +341,23 @@ function buildAssetModel(asset, ctx) {
         sections.push(contents);
     }
 
-    const users = assetUsers(ctx.app, asset);
-    const usage = makeSection('users', 'Used by');
+    if (ctx.backlinks !== false) sections.push(usersSection(asset, ctx.app));
+
+    const rest = makeSection('props', 'Properties');
+    reflectRows(rest, asset, [], SKIP_ASSET);
+    if (rest.rows.length) sections.push(rest);
+
+    return sections;
+}
+
+/**
+ * @param {Asset} asset - The asset.
+ * @param {AppBase} app - The app, to find the asset's users.
+ * @returns {PropertySection} The section listing the components using the asset.
+ */
+function usersSection(asset, app) {
+    const users = assetUsers(app, asset);
+    const usage = makeUsageSection('users', 'Used by');
     push(usage, 'components', {
         text: users.length ? `${users.length} component${users.length === 1 ? '' : 's'}` : 'no component in the scene',
         cls: users.length ? 'obj' : 'null',
@@ -355,13 +368,7 @@ function buildAssetModel(asset, ctx) {
             target: user.entity
         }))
     });
-    sections.push(usage);
-
-    const rest = makeSection('props', 'Properties');
-    reflectRows(rest, asset, [], SKIP_ASSET);
-    if (rest.rows.length) sections.push(rest);
-
-    return sections;
+    return usage;
 }
 
 export {

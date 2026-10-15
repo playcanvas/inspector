@@ -3,7 +3,7 @@ import { Material } from 'playcanvas';
 import { describeValue } from './describe.js';
 import { collectMeshInstances } from './instance-survey.js';
 import { nodeLabel } from './memory-view.js';
-import { makeSection, push } from './model.js';
+import { makeSection, makeUsageSection, push } from './model.js';
 import { materialRows, materialTextures, meshInstanceRows } from './node-model.js';
 
 /** @import { AppBase } from 'playcanvas' */
@@ -114,12 +114,11 @@ function materialListRows(survey) {
  * properties, and what uses it, with each mesh instance opening in place.
  *
  * @param {Material} material - The material.
- * @param {{ app: AppBase }} ctx - The app, to find the assets and debug lines using the material.
+ * @param {{ app: AppBase, backlinks?: boolean }} ctx - The app, to find the assets and debug lines
+ * using the material, and whether to find them at all, which a copy has no use for.
  * @returns {PropertySection[]} The sections.
  */
 function buildMaterialModel(material, ctx) {
-    const sources = surveyMaterials(ctx.app).get(material) ?? { assets: [], lines: [] };
-
     const general = makeSection('material', `${typeOf(material)} "${materialName(material)}"`);
     push(general, 'id', describeValue(material.id));
     const textures = [...materialTextures(material)];
@@ -129,8 +128,10 @@ function buildMaterialModel(material, ctx) {
         items: textures.map((texture, index) => ({ label: `[${index}]`, ...describeValue(texture) }))
     });
     general.rows.push(...materialRows(material));
+    if (ctx.backlinks === false) return [general];
 
-    const usage = makeSection('users', 'Used by');
+    const sources = surveyMaterials(ctx.app).get(material) ?? { assets: [], lines: [] };
+    const usage = makeUsageSection('users', 'Used by');
     const instances = [...material.meshInstances];
     push(usage, 'mesh instances', {
         text: instances.length ? `${instances.length} mesh instance${instances.length === 1 ? '' : 's'}` : 'none',
@@ -182,7 +183,7 @@ function materialsUsingShader(app, shader) {
  * @returns {PropertySection} A section listing them, each linking to the Materials tab.
  */
 function usedByMaterialsSection(materials) {
-    const section = makeSection('materials', 'Used by materials');
+    const section = makeUsageSection('materials', 'Used by materials');
     push(section, 'materials', {
         text: materials.length ? `${materials.length} material${materials.length === 1 ? '' : 's'}` : 'none found',
         cls: materials.length ? 'obj' : 'null',

@@ -238,6 +238,7 @@ function instancePage(list, key, ctx) {
                 text: `${instanceName(instance, list)} · ${material} · ${instance.mesh?.vertexBuffer?.numVertices ?? 0} verts` +
                     `${skipped ? ' · not drawn in this pass' : ''}`,
                 cls: skipped ? 'null' : 'obj',
+                raw: instance,
                 expand: () => meshInstanceRows(instance),
                 select: debug ? () => debug.choose(key, index, instance) : undefined,
                 active: !!debug && debug.stepKey === key && debug.instance === instance

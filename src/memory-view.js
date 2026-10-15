@@ -4,9 +4,10 @@ import {
 
 import { describeValue, isUniformBuffer } from './describe.js';
 import { collectMeshInstances } from './instance-survey.js';
-import { formatBytes, makeSection, push, read, reflectRows } from './model.js';
+import { formatBytes, makeSection, makeUsageSection, push, read, reflectRows } from './model.js';
 import { vertexFormatValue } from './node-model.js';
 import { formatUniformBuffer } from './shader-view.js';
+import { collectTextures } from './texture-view.js';
 
 /** @import { AppBase } from 'playcanvas' */
 /** @import { UniformBuffer } from 'playcanvas' */
@@ -339,8 +340,11 @@ function bufferRow(buffer, users) {
 function textureGroup(device) {
     const vram = /** @type {any} */ (device)._vram ?? {};
     const total = vram.tex ?? 0;
-    const rows = [headerRow('textures', 'Textures', String(device.textures?.size ?? 0), formatBytes(total),
-        'Every texture on the device, including the render target attachments. The Textures tab lists them')];
+    const header = headerRow('textures', 'Textures', String(device.textures?.size ?? 0), formatBytes(total),
+        'Every texture on the device, including the render target attachments. The Textures tab lists them');
+    // listed on their own tab, but a copy of the group holds them
+    header.contents = () => collectTextures(device);
+    const rows = [header];
     const split = [['assets', vram.texAsset], ['shadow maps', vram.texShadow], ['lightmaps', vram.texLightmap]];
     if (split.some(([, bytes]) => bytes)) {
         for (const [name, bytes] of split) {
@@ -437,7 +441,8 @@ function memoryRows(device, owners) {
  * belong to (linked), and every other public property.
  *
  * @param {Buffer} buffer - The buffer.
- * @param {{ app: AppBase }} ctx - The app, to find the buffer's owners.
+ * @param {{ app: AppBase, backlinks?: boolean }} ctx - The app, to find the buffer's owners, and
+ * whether to find them at all, which a copy has no use for.
  * @returns {PropertySection[]} The sections.
  */
 function buildBufferModel(buffer, ctx) {
@@ -462,9 +467,23 @@ function buildBufferModel(buffer, ctx) {
     }
     if (b.usage !== undefined) push(general, 'usage', { text: USAGE_NAMES[b.usage] ?? String(b.usage), cls: 'obj' });
     sections.push(general);
+    if (ctx.backlinks !== false) sections.push(ownersSection(buffer, ctx.app));
 
-    const owners = bufferOwners(ctx.app).get(buffer) ?? [];
-    const usage = makeSection('users', 'Used by');
+    const rest = makeSection('props', 'Properties');
+    reflectRows(rest, buffer, [], SKIP_BUFFER);
+    if (rest.rows.length) sections.push(rest);
+
+    return sections;
+}
+
+/**
+ * @param {Buffer} buffer - The buffer.
+ * @param {AppBase} app - The app, to find the buffer's owners.
+ * @returns {PropertySection} The section listing what the buffer was found to belong to.
+ */
+function ownersSection(buffer, app) {
+    const owners = bufferOwners(app).get(buffer) ?? [];
+    const usage = makeUsageSection('users', 'Used by');
     push(usage, 'owners', {
         text: owners.length ? `${owners.length} user${owners.length === 1 ? '' : 's'}` :
             'not found: held by something the panel cannot reach, such as a storage buffer',
@@ -475,13 +494,7 @@ function buildBufferModel(buffer, ctx) {
         }))
     });
     if (owners.length > 50) usage.rows.push({ key: 'more', label: '', value: { text: `… ${owners.length - 50} more`, cls: 'null' }, depth: 1 });
-    sections.push(usage);
-
-    const rest = makeSection('props', 'Properties');
-    reflectRows(rest, buffer, [], SKIP_BUFFER);
-    if (rest.rows.length) sections.push(rest);
-
-    return sections;
+    return usage;
 }
 
 export {

@@ -368,7 +368,8 @@ ${ICON_RULES}
     .pci-tip {
         display: none;
         position: fixed;
-        z-index: 2;
+        /* above the menu, whose entries have tooltips */
+        z-index: 3;
         max-width: 320px;
         padding: 5px 8px;
         background: var(--pci-raised);
@@ -378,6 +379,93 @@ ${ICON_RULES}
         box-shadow: var(--pci-shadow);
         white-space: pre-line;
         overflow-wrap: anywhere;
+        pointer-events: none;
+    }
+
+    .pci-menu {
+        display: none;
+        position: fixed;
+        z-index: 2;
+        min-width: 200px;
+        max-width: 320px;
+        padding: 4px 0;
+        background: var(--pci-raised);
+        color: var(--pci-text);
+        border: 1px solid var(--pci-border-strong);
+        border-radius: 6px;
+        box-shadow: var(--pci-shadow);
+    }
+
+    .pci-menu-title {
+        padding: 2px 10px 5px;
+        margin-bottom: 4px;
+        color: var(--pci-text-muted);
+        border-bottom: 1px solid var(--pci-border);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .pci-menu-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 10px;
+        cursor: pointer;
+    }
+
+    .pci-menu-item:hover {
+        background: var(--pci-selected);
+    }
+
+    .pci-menu-label {
+        flex: 1 1 auto;
+    }
+
+    .pci-menu-buttons {
+        display: flex;
+        gap: 2px;
+    }
+
+    .pci-menu-button {
+        font: inherit;
+        line-height: 16px;
+        min-width: 20px;
+        padding: 0 4px;
+        color: var(--pci-text-secondary);
+        background: rgba(255, 255, 255, 0.07);
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+
+    .pci-menu-button:not(:disabled):hover {
+        color: #ffffff;
+        background: var(--pci-accent-strong);
+    }
+
+    .pci-menu-button:disabled {
+        opacity: 0.35;
+        cursor: default;
+    }
+
+    .pci-toast {
+        display: none;
+        position: absolute;
+        z-index: 2;
+        left: 50%;
+        bottom: 36px;
+        transform: translateX(-50%);
+        max-width: calc(100% - 24px);
+        padding: 5px 10px;
+        background: var(--pci-raised);
+        color: var(--pci-text);
+        border: 1px solid var(--pci-border-strong);
+        border-radius: 6px;
+        box-shadow: var(--pci-shadow);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         pointer-events: none;
     }
 

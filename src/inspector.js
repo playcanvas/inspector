@@ -1,5 +1,5 @@
 import {
-    Asset, Color, Entity, FramePass, GraphNode, LAYERID_UI, Material, Mesh, RenderPassForward, RenderTarget, Shader, Texture
+    Asset, Color, Component, Entity, FramePass, GraphNode, LAYERID_UI, Material, Mesh, MeshInstance, RenderPassForward, RenderTarget, Shader, Texture
 } from 'playcanvas';
 
 import { TextureRenderer } from './renderers/texture-renderer.js';
@@ -8,6 +8,8 @@ import { WireRenderer } from './renderers/wire-renderer.js';
 import { pushResourceUsage } from './asset-usage.js';
 import { ASSET_SORTS, assetRows, buildAssetModel, collectAssets } from './asset-view.js';
 import { buildCameraModel, cameraRows, collectCameras } from './camera-view.js';
+import { ContextMenu } from './context-menu.js';
+import { copyGroup, copyList, copyListRow, copySubject, stringifyCopy } from './copy-json.js';
 import { INSTANCES_PER_PAGE, LayerStepSelection, buildPassModel, buildStepModel, captureFrameGraph, passRows } from './frame-graph-view.js';
 import { bufferKind, bufferOwners, buildBufferModel, KIND_NAMES, memoryRows, videoMemory } from './memory-view.js';
 import { HierarchyView, filterSuggestions } from './hierarchy-view.js';
@@ -18,7 +20,7 @@ import {
 } from './material-view.js';
 import { buildMeshModel, meshBytes, meshListRows, meshNote, surveyMeshes } from './mesh-view.js';
 import { formatBytes, formatName, passDisplayName } from './model.js';
-import { buildNodeModel } from './node-model.js';
+import { buildComponentModel, buildNodeModel, meshInstanceRows } from './node-model.js';
 import { AmmoDebugDraw, DEBUG_DRAW } from './physics-debug.js';
 import { bodyRows, drawCollisionShape, drawJoint, jointRows, physicsStats } from './physics-view.js';
 import { PropertyView } from './property-view.js';
@@ -33,8 +35,10 @@ import { buildTextureModel, collectTextures, textureRows } from './texture-view.
 /** @import { AppBase } from 'playcanvas' */
 /** @import { GraphicsDevice } from 'playcanvas' */
 /** @import { FrameSnapshot, PassModelContext } from './frame-graph-view.js' */
-/** @import { MeshInstance } from 'playcanvas' */
-/** @import { PropertySection } from './model.js' */
+/** @import { PropertyRow, PropertySection } from './model.js' */
+/** @import { MenuItem } from './context-menu.js' */
+/** @import { CopyOptions } from './copy-json.js' */
+/** @import { CopyTarget } from './property-view.js' */
 
 /**
  * Options for {@link Inspector}.
@@ -115,6 +119,10 @@ const TAB_TIPS = {
 };
 
 const CHANNELS_TIP = 'Which channels of the texture to show. A single channel shows as grayscale';
+
+// how many links the deep copy follows until changed, and at most
+const COPY_DEPTH = 3;
+const MAX_COPY_DEPTH = 20;
 
 // events the panel swallows so that they never reach the input handlers of the app underneath
 const SWALLOWED_EVENTS = ['keydown', 'keyup', 'keypress', 'pointerdown', 'mousedown', 'wheel', 'touchstart', 'contextmenu'];
@@ -455,6 +463,22 @@ class Inspector {
      * @private
      */
     _bodyList;
+
+    /**
+     * The menu opened with a right click, which copies what it was opened on.
+     *
+     * @type {ContextMenu|null}
+     * @private
+     */
+    _menu = null;
+
+    /**
+     * How many links the menu's deep copy follows.
+     *
+     * @type {number}
+     * @private
+     */
+    _copyDepth = COPY_DEPTH;
 
     /**
      * Draws the selected render target's texture over the canvas, straight from the GPU.
@@ -1031,6 +1055,8 @@ class Inspector {
         this._hiddenBodies.clear();
 
         if (this._popup) this._dockBack();
+        this._menu?.destroy();
+        this._menu = null;
         this._textures.destroy();
         this._host?.remove();
         this._host = null;
@@ -1175,6 +1201,7 @@ class Inspector {
             this._popup.focus();
             return;
         }
+        this._menu?.hide();
 
         const height = Math.max(480, Math.round(window.innerHeight * 0.9));
         const popup = window.open('', 'pc-inspector', `popup=yes,width=${this._width},height=${height}`);
@@ -1208,6 +1235,7 @@ class Inspector {
         const popup = this._popup;
         if (!popup) return;
         this._popup = null;
+        this._menu?.hide();
 
         popup.removeEventListener('pagehide', this._onPopupHide);
         popup.removeEventListener('keydown', this._onKeyDown);
@@ -1632,6 +1660,10 @@ class Inspector {
         installTooltip(panel);
         shadow.append(style, panel);
 
+        this._menu?.destroy();
+        this._menu = new ContextMenu(panel);
+        panel.addEventListener('contextmenu', this._onContextMenu);
+
         // keep the app's input handlers from seeing interaction with the panel
         for (const type of SWALLOWED_EVENTS) {
             host.addEventListener(type, (e) => {
@@ -1705,11 +1737,7 @@ class Inspector {
         const onHover = (el, target) => {
             this._hoverLink = el && target ? { el, target } : null;
         };
-        const views = [
-            this._properties, this._passList, this._targetList, this._textureList, this._shaderList, this._meshList,
-            this._materialList, this._scriptList, this._cameraList, this._bufferList, this._assetList, this._bodyList
-        ];
-        for (const view of views) view.onHover = onHover;
+        for (const view of [this._properties, ...this._lists()]) view.onHover = onHover;
     }
 
     /**
@@ -1818,6 +1846,7 @@ class Inspector {
             if (typeof stored.targetPreview.channels === 'string') this._previewChannels.value = stored.targetPreview.channels;
         }
         if (typeof stored.assetSort === 'string') this._assetSort.value = stored.assetSort;
+        if (typeof stored.copyDepth === 'number') this._setCopyDepth(stored.copyDepth);
         if (typeof stored.filterBy === 'string') {
             this._filterBy.value = stored.filterBy;
             this._hierarchy.filterBy = /** @type {any} */ (this._filterBy.value);
@@ -1855,7 +1884,8 @@ class Inspector {
                 targetPreview: { enabled: this._previewToggle.checked, channels: this._previewChannels.value },
                 texturePreview: { enabled: this._texturePreviewToggle.checked, channels: this._textureChannels.value },
                 assetSort: this._assetSort.value,
-                filterBy: this._filterBy.value
+                filterBy: this._filterBy.value,
+                copyDepth: this._copyDepth
             }));
         } catch (e) {
             // storage unavailable or full: settings simply do not persist
@@ -2467,6 +2497,7 @@ class Inspector {
      */
     _setTab(tab) {
         this._tab = tab;
+        this._menu?.hide();
         this._filterBy.style.display = tab === 'hierarchy' ? '' : 'none';
         this._updateFilterHint();
         for (const [id, button] of Object.entries(this._tabButtons)) {
@@ -2615,6 +2646,224 @@ class Inspector {
     }
 
     /**
+     * @returns {Record<string, ListView>} The list of each tab, all but the hierarchy, by tab.
+     * @private
+     */
+    _tabLists() {
+        return {
+            passes: this._passList,
+            targets: this._targetList,
+            textures: this._textureList,
+            shaders: this._shaderList,
+            meshes: this._meshList,
+            materials: this._materialList,
+            scripts: this._scriptList,
+            cameras: this._cameraList,
+            memory: this._bufferList,
+            assets: this._assetList,
+            physics: this._bodyList
+        };
+    }
+
+    /**
+     * @returns {ListView[]} The lists of the tabs, all but the hierarchy.
+     * @private
+     */
+    _lists() {
+        return Object.values(this._tabLists());
+    }
+
+    /**
+     * Opens the copy menu on what was right-clicked. Text fields keep the browser's own menu, to
+     * paste into them.
+     *
+     * @param {MouseEvent} e - The event.
+     * @private
+     */
+    _onContextMenu = (e) => {
+        if (isTextTarget(e)) return;
+        const copy = this._copyTargetAt(/** @type {Node} */ (e.composedPath()[0]));
+        if (!copy) return;
+        e.preventDefault();
+        this._menu?.show(e.clientX, e.clientY, copy.title, this._copyItems(copy));
+    };
+
+    /**
+     * What a right click copies: a row or section of the property view, or anywhere else in it
+     * the subject. A row of a list or of the hierarchy is selected first, the way a click selects
+     * it, and the subject it shows is copied; the header of a group copies the group, and a row
+     * that selects nothing its figures. A tab is opened first, the way a click opens it, and
+     * everything it lists is copied.
+     *
+     * @param {Node} target - What was right-clicked.
+     * @returns {CopyTarget|null} What to copy, or null for a part of the panel nothing is copied
+     * from, such as the toolbar.
+     * @private
+     */
+    _copyTargetAt(target) {
+        const property = this._properties.copyTargetAt(target);
+        if (property) return property;
+
+        const node = this._hierarchy.nodeAt(target);
+        if (node) {
+            this._hierarchy.select(node);
+            return this._properties.subjectCopyTarget();
+        }
+        for (const list of this._lists()) {
+            const row = list.rowAt(target);
+            if (!row) continue;
+            if (row.header) return { title: row.name, copy: options => copyGroup(list.rows, row.key, options) };
+            if (row.inert) return { title: row.name, copy: () => copyListRow(row) };
+            list.select(row.key);
+            return this._properties.subjectCopyTarget();
+        }
+
+        const tab = Object.keys(this._tabButtons).find(id => this._tabButtons[id].contains(target));
+        if (tab) {
+            this._setTab(/** @type {any} */ (tab));
+            return this._tabCopyTarget(tab);
+        }
+        return null;
+    }
+
+    /**
+     * @param {string} tab - A tab.
+     * @returns {CopyTarget|null} A copy of everything the tab lists: the hierarchy from its root,
+     * or every row of the tab's list, whatever its filter shows.
+     * @private
+     */
+    _tabCopyTarget(tab) {
+        const title = this._tabButtons[tab].textContent ?? tab;
+        if (tab === 'hierarchy') {
+            const root = this._app.root;
+            return { title, copy: options => copySubject(root, buildNodeModel(root), options) };
+        }
+        const list = this._tabLists()[tab];
+        return list ? { title, copy: options => copyList(title, list.rows, options) } : null;
+    }
+
+    /**
+     * @param {CopyTarget} copy - What the menu copies.
+     * @returns {MenuItem[]} The entries of the menu: on its own, a
+     * number of links deep, and every link there is.
+     * @private
+     */
+    _copyItems(copy) {
+        const levels = n => `${n} level${n === 1 ? '' : 's'}`;
+        return [{
+            text: () => 'Copy as JSON',
+            title: 'Copy it on its own: what it links to is named, not copied',
+            run: () => this._copy(copy, 0)
+        }, {
+            text: () => `Copy ${levels(this._copyDepth)} deep`,
+            title: 'Copy it with what it links to, up to this many links away: children, mesh instances, materials, textures',
+            run: () => this._copy(copy, this._copyDepth),
+            buttons: [{
+                text: '−',
+                title: 'One level less',
+                disabled: () => this._copyDepth <= 1,
+                run: () => this._setCopyDepth(this._copyDepth - 1)
+            }, {
+                text: '+',
+                title: 'One level more',
+                disabled: () => this._copyDepth >= MAX_COPY_DEPTH,
+                run: () => this._setCopyDepth(this._copyDepth + 1)
+            }]
+        }, {
+            text: () => 'Copy all levels',
+            title: 'Copy it with everything it links to, however far, such as the whole hierarchy below a node',
+            run: () => this._copy(copy, Infinity)
+        }];
+    }
+
+    /**
+     * @param {number} depth - How many links the deep copy follows.
+     * @private
+     */
+    _setCopyDepth(depth) {
+        this._copyDepth = Math.max(1, Math.min(MAX_COPY_DEPTH, Math.round(depth)));
+        this._saveSettings();
+    }
+
+    /**
+     * Copies to the clipboard as JSON, and notes how much was copied.
+     *
+     * @param {CopyTarget} copy - What to copy.
+     * @param {number} depth - How many links to follow, see {@link CopyOptions#depth}.
+     * @private
+     */
+    _copy(copy, depth) {
+        const ctx = { ...this._context(), backlinks: false };
+        const opaque = this._opaqueObjects();
+        let result;
+        let text;
+        try {
+            result = copy.copy({ depth, modelFor: obj => this._copyModel(obj, ctx), opaque: obj => opaque.has(obj) });
+            text = stringifyCopy(result.json);
+        } catch (e) {
+            this._menu?.note(`Could not copy: ${e?.message ?? e}`);
+            return;
+        }
+
+        const size = formatBytes(text.length);
+        const note = `Copied ${result.objects ? `${result.objects} object${result.objects === 1 ? '' : 's'}, ` : ''}${size}` +
+            `${result.truncated ? ', stopped at the object limit' : ''}`;
+        // the clipboard of the window the panel is in, which is the one with focus once popped out
+        const clipboard = (this._panel.ownerDocument.defaultView ?? window).navigator.clipboard;
+        if (!clipboard) {
+            this._menu?.note('The page has no access to the clipboard');
+            return;
+        }
+        clipboard.writeText(text).then(
+            () => this._menu?.note(note),
+            e => this._menu?.note(`Could not copy: ${e?.message ?? e}`)
+        );
+    }
+
+    /**
+     * @returns {Set<object>} The app's own objects, which a copy never follows, as through them it
+     * would reach everything else.
+     * @private
+     */
+    _opaqueObjects() {
+        const app = /** @type {any} */ (this._app);
+        const objects = new Set([app, app.scene?.layers]);
+        for (const value of Object.values(app)) {
+            if (value && typeof value === 'object') objects.add(value);
+        }
+        for (const system of app.systems?.list ?? []) objects.add(system);
+        for (const layer of app.scene?.layers?.layerList ?? []) objects.add(layer);
+        return objects;
+    }
+
+    /**
+     * The model a copy follows a link into: what the tab the link opens on shows, see
+     * {@link Inspector#_selectAny}, without the lists of what uses the object.
+     *
+     * @param {object} obj - An object reached through a link.
+     * @param {PassModelContext & { app: AppBase, backlinks: boolean }} ctx - What the model
+     * builders need besides their subject.
+     * @returns {PropertySection[]|PropertyRow[]|null} The model, or null for an object no tab shows.
+     * @private
+     */
+    _copyModel(obj, ctx) {
+        if (obj instanceof GraphNode) return buildNodeModel(obj);
+        if (obj instanceof Component) return buildComponentModel(obj);
+        if (obj instanceof MeshInstance) return meshInstanceRows(obj);
+        if (obj instanceof RenderTarget) return buildRenderTargetModel(obj, ctx);
+        if (obj instanceof FramePass) return buildPassModel(obj, ctx);
+        if (obj instanceof LayerStepSelection) return buildStepModel(obj, ctx);
+        if (obj instanceof Texture) return buildTextureModel(obj, ctx);
+        if (obj instanceof Shader) return buildShaderModel(obj);
+        if (obj instanceof Asset) return buildAssetModel(obj, ctx);
+        if (isScriptClass(obj)) return buildScriptModel(/** @type {Function} */ (obj), ctx);
+        if (obj instanceof Material) return buildMaterialModel(obj, ctx);
+        if (obj instanceof Mesh) return buildMeshModel(obj, ctx);
+        if (bufferKind(obj)) return buildBufferModel(obj, ctx);
+        return null;
+    }
+
+    /**
      * Reveals a linked object in the tab that lists it: nodes in the hierarchy, passes in the frame
      * graph, render targets in their list.
      *
@@ -2714,6 +2963,7 @@ class Inspector {
      */
     _applyVisibility() {
         if (!this._host) return;
+        if (!this._visible) this._menu?.hide();
         this._host.style.display = this._visible ? '' : 'none';
     }
 

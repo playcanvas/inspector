@@ -25,6 +25,10 @@ import {
  * reads the live object rather than a snapshot.
  * @property {Described[]} [items] - Expanded entries of a collection, each carrying a `label`.
  * @property {string} [label] - The label of an expanded collection entry.
+ * @property {*} [raw] - The value described, when the text was made from one. A copy of the row
+ * is made from it rather than from the text, which rounds numbers and cuts strings and lists short.
+ * @property {boolean} [backlink] - Whether the value refers back to what holds or uses the
+ * subject, such as a node's parent. Copies leave it out, so copying an object never climbs out of it.
  */
 
 /** The number of collection entries expanded into their own rows. */
@@ -106,9 +110,20 @@ function expandItems(entries, count) {
  *
  * @param {*} value - The value to describe.
  * @param {number} [depth] - The nesting depth. Nested values are kept to a short type name.
- * @returns {Described} The description.
+ * @returns {Described} The description, carrying the value as `raw`.
  */
 function describeValue(value, depth = 0) {
+    const described = describeOne(value, depth);
+    described.raw = value;
+    return described;
+}
+
+/**
+ * @param {*} value - The value to describe.
+ * @param {number} depth - The nesting depth.
+ * @returns {Described} The description, see {@link describeValue}.
+ */
+function describeOne(value, depth) {
     if (value === null) return { text: 'null', cls: 'null' };
     if (value === undefined) return { text: 'undefined', cls: 'null' };
 
