@@ -2045,7 +2045,7 @@ describe('Inspector frame graph capture', function () {
             name: 'RenderPassForward', beforePasses: [], afterPasses: [], executeEnabled: true, renderTarget: null, layerRenderSteps: [step]
         });
         const backBuffer = { name: 'Backbuffer', width: 4, height: 4, samples: 1, mipLevel: 0 };
-        const app = { graphicsDevice: { backBuffer, gpuProfiler: null }, frameGraph: { renderPasses: [forward] }, scene: {} };
+        const app = { graphicsDevice: { backBuffer, gpuProfiler: null }, frameGraph: { passes: [forward] }, scene: {} };
         return { app, forward, step, layer };
     };
 
@@ -2132,7 +2132,7 @@ describe('Inspector frame graph capture', function () {
         jsdomSetup();
         const app = createApp();
         const { forward } = forwardScene([instance('wall')]);
-        app.frameGraph = { renderPasses: [forward] };
+        app.frameGraph = { passes: [forward] };
         const inspector = /** @type {any} */ (new Inspector(app));
         inspector._setTab('passes');
         const rows = [...inspector._panels.passes.querySelectorAll('.pci-lrow')];
@@ -2158,7 +2158,7 @@ describe('Inspector frame graph capture', function () {
         app.renderer = { debugDrawLimitSupported: true, debugDrawLimit: null };
         const drawn = [instance('a'), instance('b'), instance('c')];
         const { forward, step, layer } = forwardScene(drawn);
-        app.frameGraph = { renderPasses: [forward] };
+        app.frameGraph = { passes: [forward] };
         const inspector = /** @type {any} */ (new Inspector(app));
         inspector._setTab('passes');
         const rows = [...inspector._panels.passes.querySelectorAll('.pci-lrow')];
@@ -2228,7 +2228,7 @@ describe('Inspector frame graph capture', function () {
         culled.transparent = [glass];
         const transparentStep = { ...step, transparent: true };
         forward.layerRenderSteps.push(transparentStep);
-        app.frameGraph = { renderPasses: [forward] };
+        app.frameGraph = { passes: [forward] };
         const inspector = /** @type {any} */ (new Inspector(app));
         inspector._setTab('passes');
         [...inspector._panels.passes.querySelectorAll('.pci-lrow')][1].click();
@@ -2305,7 +2305,7 @@ describe('Inspector frame graph capture', function () {
         const alone = pass('X');
         const app = /** @type {any} */ ({
             graphicsDevice: { backBuffer: {}, gpuProfiler: null },
-            frameGraph: { renderPasses: [alone, first, inner, merged, owner] }
+            frameGraph: { passes: [alone, first, inner, merged, owner] }
         });
         const rows = passRows(captureFrameGraph(app), app.graphicsDevice);
 
@@ -2327,7 +2327,7 @@ describe('Inspector frame graph capture', function () {
         expect(rows[3].cells[0].text).to.equal('3+');
 
         // a frame where nothing owns anything has no gutter
-        app.frameGraph.renderPasses = [alone];
+        app.frameGraph.passes = [alone];
         expect(passRows(captureFrameGraph(app), app.graphicsDevice)[0].guides).to.equal(undefined);
     });
 
@@ -2340,7 +2340,7 @@ describe('Inspector frame graph capture', function () {
 
         const app = /** @type {any} */ ({
             graphicsDevice: { backBuffer, gpuProfiler: null },
-            frameGraph: { renderPasses: [shadow, wrapper, forward] }
+            frameGraph: { passes: [shadow, wrapper, forward] }
         });
         const frame = captureFrameGraph(app);
 
@@ -2355,6 +2355,16 @@ describe('Inspector frame graph capture', function () {
         expect(frame.usage.get(backBuffer).map(e => e.pass)).to.deep.equal([forward]);
         expect(frame.nameCounts.get('Shadow')).to.equal(1);
         expect(frame.timings).to.be.null;
+    });
+
+    it('reads the passes of engines before 2.24, which name the list renderPasses', function () {
+        const forward = pass('RenderPassForward', { renderTarget: null });
+        const app = /** @type {any} */ ({
+            graphicsDevice: { backBuffer: {}, gpuProfiler: null },
+            frameGraph: { renderPasses: [forward] }
+        });
+
+        expect(captureFrameGraph(app).entries.map(e => e.pass)).to.deep.equal([forward]);
     });
 });
 
@@ -2890,7 +2900,7 @@ describe('Inspector link hover', function () {
 
         const shadow = { name: 'RenderPassShadow', beforePasses: [], afterPasses: [], executeEnabled: true, renderTarget: target };
         const screen = { name: 'RenderPassForward', beforePasses: [], afterPasses: [], executeEnabled: true, renderTarget: null };
-        const frame = captureFrameGraph(/** @type {any} */ ({ graphicsDevice: device, frameGraph: { renderPasses: [shadow, screen] } }));
+        const frame = captureFrameGraph(/** @type {any} */ ({ graphicsDevice: device, frameGraph: { passes: [shadow, screen] } }));
         const rows = passRows(frame, device);
         expect(rows[0].preview).to.equal(target);
         // the screen is the view itself

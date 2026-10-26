@@ -326,7 +326,8 @@ function colorFormat(rt, index, device) {
  */
 function captureFrameGraph(app) {
     const device = app.graphicsDevice;
-    const passes = app.frameGraph?.renderPasses ?? [];
+    // engines before 2.24 name the list renderPasses
+    const passes = app.frameGraph?.passes ?? app.frameGraph?.renderPasses ?? [];
 
     /** @type {Map<FramePass, FramePass>} */
     const parentOf = new Map();
