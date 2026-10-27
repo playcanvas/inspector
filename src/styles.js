@@ -32,7 +32,11 @@ const ICONS = {
     close: '<path d="M18 6 6 18M6 6l12 12"/>',
     translate: '<path d="M12 3v18M3 12h18"/><path d="m9 6 3-3 3 3"/><path d="m9 18 3 3 3-3"/><path d="m6 9-3 3 3 3"/><path d="m18 9 3 3-3 3"/>',
     rotate: '<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3v4h-4"/>',
-    scale: '<rect x="3" y="11" width="10" height="10" rx="1"/><path d="m13 11 8-8"/><path d="M15 3h6v6"/>'
+    scale: '<rect x="3" y="11" width="10" height="10" rx="1"/><path d="m13 11 8-8"/><path d="M15 3h6v6"/>',
+    // recording, as the browser's own profiler shows it: a ring around a dot to record, red while
+    // recording, and the sign for none to clear
+    record: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4" fill="black" stroke="none"/>',
+    clear: '<circle cx="12" cy="12" r="8.5"/><path d="M18 6 6 18"/>'
 };
 
 /**
@@ -551,6 +555,162 @@ ${ICON_RULES}
 
     .pci-subbar.pci-inactive {
         opacity: 0.45;
+    }
+
+    /* the charts of the Performance tab want more room than a list, until the splitter is dragged */
+    .pci-hierarchy.pci-tall {
+        flex-basis: 68%;
+    }
+
+    .pci-group {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    /* an icon button the size of the text buttons beside it, with their backing */
+    .pci-icon-btn.pci-small {
+        width: 26px;
+        height: 22px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.07);
+    }
+
+    .pci-icon-btn.pci-small::before {
+        width: 14px;
+        height: 14px;
+    }
+
+    .pci-btn.pci-record.pci-active,
+    .pci-btn.pci-record.pci-active:not(:disabled):hover {
+        background: rgba(241, 76, 76, 0.18);
+        color: #ff5a52;
+    }
+
+    .pci-perf-charts {
+        flex: 1 1 auto;
+        position: relative;
+        min-height: 200px;
+        margin: 6px 8px 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        cursor: crosshair;
+        touch-action: none;
+    }
+
+    /* the Performance tab, which places the hover box of its charts */
+    .pci-perf {
+        position: relative;
+    }
+
+    /* the frames in view while zoomed in, under the plot */
+    .pci-perf-hscroll {
+        flex: 0 0 auto;
+        position: relative;
+        height: 8px;
+        margin: 4px 8px 0;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 4px;
+        cursor: pointer;
+        touch-action: none;
+    }
+
+    .pci-perf-hscroll-thumb {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        min-width: 12px;
+        background: rgba(255, 255, 255, 0.3);
+        border-radius: 4px;
+        cursor: grab;
+    }
+
+    .pci-perf-hscroll-thumb:hover {
+        background: rgba(255, 255, 255, 0.45);
+    }
+
+    .pci-perf-hscroll.pci-inactive,
+    .pci-perf-hscroll.pci-inactive .pci-perf-hscroll-thumb {
+        cursor: default;
+    }
+
+    .pci-perf-hscroll.pci-inactive .pci-perf-hscroll-thumb {
+        background: rgba(255, 255, 255, 0.08);
+    }
+
+    .pci-perf-timeline {
+        flex: 0 0 auto;
+        position: relative;
+        margin: 6px 8px;
+        border-top: 1px solid var(--pci-border);
+    }
+
+    .pci-perf-charts canvas,
+    .pci-perf-timeline canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+    }
+
+    /* the marks over the charts, redrawn alone as the pointer moves; the charts below take the pointer */
+    .pci-perf-charts canvas.pci-perf-overlay {
+        pointer-events: none;
+    }
+
+    /* what the pointer is over in the charts, beside it */
+    .pci-perf-hover {
+        display: none;
+        position: absolute;
+        z-index: 2;
+        max-width: 320px;
+        padding: 5px 8px;
+        background: var(--pci-raised);
+        color: var(--pci-text);
+        border: 1px solid var(--pci-border-strong);
+        border-radius: 6px;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+        font-size: 11px;
+        line-height: 1.45;
+        pointer-events: none;
+    }
+
+    .pci-perf-hover-line {
+        display: flex;
+        align-items: center;
+        white-space: nowrap;
+    }
+
+    .pci-perf-hover-line.pci-indent {
+        padding-left: 10px;
+    }
+
+    .pci-perf-hover-line.pci-strong {
+        margin: 0 -4px;
+        padding-right: 4px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.1);
+        color: #ffffff;
+        font-weight: 600;
+    }
+
+    .pci-perf-hover-line.pci-indent.pci-strong {
+        padding-left: 14px;
+    }
+
+    .pci-perf-hover-line.pci-wrap {
+        white-space: normal;
+        width: 280px;
+    }
+
+    .pci-perf-swatch {
+        flex: 0 0 auto;
+        width: 9px;
+        height: 9px;
+        margin-right: 6px;
+        border-radius: 2px;
     }
 
     .pci-cell-toggle {

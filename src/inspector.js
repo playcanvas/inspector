@@ -21,6 +21,10 @@ import {
 import { buildMeshModel, meshBytes, meshListRows, meshNote, surveyMeshes } from './mesh-view.js';
 import { formatBytes, formatName, passDisplayName } from './model.js';
 import { buildComponentModel, buildNodeModel, meshInstanceRows } from './node-model.js';
+import { PerfCapture } from './perf-capture.js';
+import { PerfCharts } from './perf-chart.js';
+import { captureJson, frameJson, rangeJson, seriesRows, toCsv } from './perf-copy.js';
+import { buildPerfModel, captureNorms, formatMs, isHitch } from './perf-view.js';
 import { AmmoDebugDraw, DEBUG_DRAW } from './physics-debug.js';
 import { bodyRows, drawCollisionShape, drawJoint, jointRows, physicsStats } from './physics-view.js';
 import { PropertyView } from './property-view.js';
@@ -64,8 +68,10 @@ import { TRANSFORM_POINTER_EVENTS, TransformTool } from './transform-tool.js';
  * or the panel's own close button.
  * @property {string|null} [storageKey] - The local storage key the panel's settings are kept
  * under, so they survive a reload or a restart of the app: the physics drawing switch and options,
- * the bodies excluded from it (by entity path), the active tab, the panel width and the GPU
- * timings switch. Stored settings take precedence over the defaults given here. Defaults to
+ * the bodies excluded from it (by entity path), the active tab, the panel width, the GPU
+ * timings switch, whether the CPU chart includes the inspector's time, and the charts collapsed
+ * and memory lines hidden on the Performance tab. Stored settings take
+ * precedence over the defaults given here. Defaults to
  * 'pc-inspector'; null keeps nothing.
  */
 
@@ -104,12 +110,22 @@ const PHYSICS_FLAGS = {
 const LIST_INTERVAL = 0.5;
 const PROPERTY_INTERVAL = 0.1;
 
+// seconds between refreshes of the Performance tab's frame details, which it redraws with its
+// charts at the same pace
+const PERF_PROPERTY_INTERVAL = 0.25;
+
+// the names a copy of each series of the Performance tab goes by
+const PERF_SERIES_NAMES = {
+    frame: 'Frame', cpu: 'CPU', gpu: 'GPU', draws: 'Draw calls', memory: 'Memory', resources: 'Resources', events: 'Events'
+};
+
 // the tooltips of the tabs
 const TAB_TIPS = {
     hierarchy: 'The entity tree, and the components and properties of the selected entity',
     cameras: 'The cameras of the scene in render order, with where they draw, their render mode and a way to fly each',
     assets: 'The assets of the registry, and what uses each',
     passes: 'The passes that rendered the last frame, with the layers, draws and targets of each',
+    perf: 'Record frames and chart their CPU and GPU time, draw calls, memory and events over the whole capture.\nClick a frame to see everything recorded for it, drag to select frames, scroll to zoom, double-click to see\nthe whole capture. A dashed line marks the display interval, red ticks the hitches',
     targets: 'The render targets on the device, with a live preview of their textures',
     textures: 'The textures on the device, largest first, with a live preview',
     meshes: 'The meshes of the app, found through the components, layers and assets using them, largest first',
@@ -180,7 +196,7 @@ function isTextTarget(e) {
 }
 
 /**
- * An in-page inspector for a running application. It docks a panel over the canvas with twelve
+ * An in-page inspector for a running application. It docks a panel over the canvas with thirteen
  * tabs above a live property view of whatever is selected:
  *
  * - Hierarchy: the entity tree. The property view shows the node's transform, every component it
@@ -195,6 +211,12 @@ function isTextTarget(e) {
  *   prints them, with the layer steps of forward passes, the light of shadow passes and optional
  *   GPU timings. Render target cells link to the next tab. With the debug engine, the debug frame
  *   draws a forward pass only up to a chosen draw, stepped one draw at a time with the arrow keys.
+ * - Performance: frames recorded while Record is on, up to the last 1000, charted over
+ *   the whole capture: the frame interval, the CPU time on the main thread by phase, the GPU time,
+ *   the draw calls and video memory, and the events of each frame, such as shaders compiled and
+ *   long animation frames. Clicking a frame shows it on a timeline of its own and everything
+ *   recorded for it in the property view; dragging selects frames to compare their figures. The
+ *   inspector's own time is told apart from the app's.
  * - Render targets: every render target on the device including the backbuffer, with its
  *   attachments and the passes that rendered into it this frame, linking back to the frame graph.
  *   The selected target's attachment can be previewed live in a corner of the viewport.
@@ -419,10 +441,88 @@ class Inspector {
     _nextPropertyRefresh = 0;
 
     /**
-     * @type {'hierarchy'|'cameras'|'assets'|'passes'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'}
+     * @type {'hierarchy'|'cameras'|'assets'|'passes'|'perf'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'}
      * @private
      */
     _tab = 'hierarchy';
+
+    /**
+     * The frames recorded for the Performance tab. Hooked into the app only while recording.
+     *
+     * @type {PerfCapture}
+     * @private
+     */
+    _perf;
+
+    /**
+     * The charts of the Performance tab, and the frame they show.
+     *
+     * @type {PerfCharts}
+     * @private
+     */
+    _perfCharts;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _perfRecordBtn;
+
+    /**
+     * Shows the newest frame, and keeps following it as frames are recorded.
+     *
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _perfLastBtn;
+
+    /**
+     * The GPU timings switch of the Performance tab, kept in step with the Frame graph's.
+     *
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _perfGpuToggle;
+
+    /**
+     * Whether the CPU chart includes the inspector's own time.
+     *
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _perfInspectorToggle;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _perfNote;
+
+    /**
+     * The filter bar, which the Performance tab has no list for.
+     *
+     * @type {HTMLElement}
+     * @private
+     */
+    _filterEl;
+
+    /**
+     * Model builder for the property view on the Performance tab: the frames the charts show.
+     *
+     * @param {PerfCharts} charts - The charts.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _perfModel = charts => buildPerfModel({
+        capture: this._perf,
+        seq: charts.shown,
+        range: charts.range,
+        gpu: {
+            supported: !!this._app.graphicsDevice.gpuProfiler,
+            enabled: !!this._app.graphicsDevice.gpuProfiler?.enabled,
+            enable: () => this._setGpuTimings(true)
+        }
+    });
 
     /**
      * @type {FrameSnapshot|null}
@@ -1029,6 +1129,7 @@ class Inspector {
 
         this._wire = new WireRenderer(app);
         this._textures = new TextureRenderer(app);
+        this._perf = new PerfCapture(app);
         this._buildDom();
         this._hierarchy.setRoot(app.root);
         this._gpuWasEnabled = !!app.graphicsDevice.gpuProfiler?.enabled;
@@ -1073,6 +1174,8 @@ class Inspector {
         this._picker = null;
 
         this.paused = false;
+        this._perf.destroy();
+        this._perfCharts.destroy();
         const profiler = app.graphicsDevice?.gpuProfiler;
         if (profiler) profiler.enabled = this._gpuWasEnabled;
         this._pruneHiddenBodies();
@@ -1272,6 +1375,7 @@ class Inspector {
             // the document that held the panel is gone, so the panel is too: build it anew
             const selected = this._selected;
             this._host.remove?.();
+            this._perfCharts.destroy();
             this._buildDom();
             this._hierarchy.setRoot(this._app.root);
             if (selected) this._hierarchy.select(selected);
@@ -1284,10 +1388,23 @@ class Inspector {
     }
 
     /**
+     * Runs the panel's work for the frame, timed so a capture can tell it apart from the app's own:
+     * it runs inside the app's update.
+     *
      * @param {number} dt - The frame delta, scaled by the app time scale.
      * @private
      */
     _onUpdate(dt) {
+        const start = performance.now();
+        this._updatePanel(dt);
+        this._perf.addOverhead(start, performance.now() - start);
+    }
+
+    /**
+     * @param {number} dt - The frame delta, scaled by the app time scale.
+     * @private
+     */
+    _updatePanel(dt) {
         this._drawPhysics();
 
         // the user closed the pop-out window: bring the panel home
@@ -1297,7 +1414,12 @@ class Inspector {
 
         // wall clock, as the frame delta is zero while paused
         const now = performance.now();
-        if (now >= this._nextListRefresh) {
+
+        // the charts of the Performance tab redraw on their own pace; the list and property
+        // refreshes wait for a frame without a redraw, so no one frame takes the cost of all three
+        const perfDrew = this._tab === 'perf' && this._perfCharts.update(now);
+
+        if (now >= this._nextListRefresh && !perfDrew) {
             this._nextListRefresh = now + LIST_INTERVAL * 1000;
             this._refreshLists(true);
             // mesh instances the app added since are drawn in wireframe too
@@ -1309,8 +1431,8 @@ class Inspector {
             this._drawHighlight(this._cameraList.selected.entity);
         }
         this._updateModeStatus();
-        if (now >= this._nextPropertyRefresh) {
-            this._nextPropertyRefresh = now + PROPERTY_INTERVAL * 1000;
+        if (now >= this._nextPropertyRefresh && !perfDrew) {
+            this._nextPropertyRefresh = now + (this._tab === 'perf' ? PERF_PROPERTY_INTERVAL : PROPERTY_INTERVAL) * 1000;
             this._properties.refresh();
         }
 
@@ -1440,7 +1562,7 @@ class Inspector {
         const tabs = el('div', 'pci-tabs');
         this._tabButtons = {};
         const tabList = [
-            ['hierarchy', 'Hierarchy'], ['cameras', 'Cameras'], ['assets', 'Assets'], ['passes', 'Frame graph'],
+            ['hierarchy', 'Hierarchy'], ['cameras', 'Cameras'], ['assets', 'Assets'], ['passes', 'Frame graph'], ['perf', 'Performance'],
             ['targets', 'Render targets'], ['textures', 'Textures'], ['meshes', 'Meshes'], ['materials', 'Materials'], ['scripts', 'Scripts'], ['memory', 'Memory'],
             ['shaders', 'Shaders'], ['physics', 'Physics']
         ];
@@ -1453,6 +1575,7 @@ class Inspector {
         }
 
         const filter = el('div', 'pci-filter');
+        this._filterEl = filter;
         // what the hierarchy filter matches, shown on that tab only: the lists match names
         this._filterBy = /** @type {HTMLSelectElement} */ (document.createElement('select'));
         this._filterBy.className = 'pci-select';
@@ -1489,6 +1612,52 @@ class Inspector {
         this._passNote.style.display = 'none';
         const passList = el('div', 'pci-list');
         passPanel.append(passBar, this._passNote, passList);
+
+        // performance: recording controls, the charts of the capture and the timeline of a frame
+        const perfPanel = el('div', 'pci-listpanel');
+        const perfBar = el('div', 'pci-subbar pci-wrap');
+        const button = (parent, text, tip, run) => {
+            const b = /** @type {HTMLButtonElement} */ (el('button', 'pci-btn', text));
+            setTip(b, tip);
+            b.addEventListener('click', run);
+            parent.appendChild(b);
+            return b;
+        };
+        const recordGroup = el('span', 'pci-group');
+        this._perfRecordBtn = iconButton('record', 'Record');
+        this._perfRecordBtn.classList.add('pci-small', 'pci-record');
+        this._perfRecordBtn.addEventListener('click', () => this._setRecording(!this._perf.recording));
+        const clearBtn = iconButton('clear', 'Clear');
+        clearBtn.classList.add('pci-small');
+        setTip(clearBtn, 'Clear: forget every frame recorded');
+        clearBtn.addEventListener('click', () => {
+            this._perf.clear();
+            this._perfCharts.reset();
+        });
+        recordGroup.append(this._perfRecordBtn, clearBtn);
+        const frameGroup = el('span', 'pci-group');
+        button(frameGroup, '«', 'Show the first frame kept. The Home key does the same while the panel has focus', () => this._perfCharts.pick(this._perf.first));
+        button(frameGroup, '‹', 'Show the frame before. The left arrow key does the same while the panel has focus; with Shift, ten frames', () => this._perfCharts.step(-1));
+        button(frameGroup, '›', 'Show the frame after. The right arrow key does the same while the panel has focus; with Shift, ten frames', () => this._perfCharts.step(1));
+        this._perfLastBtn = button(frameGroup, '»', 'Show the newest frame, and keep showing it as frames are recorded. The End key does the same while the panel has focus', () => this._perfCharts.follow());
+        perfBar.append(recordGroup, frameGroup);
+        this._perfGpuToggle = this._makeToggle(perfBar, 'GPU timings',
+            'Enable the GPU profiler and record the time each frame and each pass take on the GPU. Measuring adds a little overhead');
+        this._perfInspectorToggle = this._makeToggle(perfBar, 'Inspector time',
+            'Include the inspector\'s own time in the CPU chart. It runs inside the app\'s update; leave it out to scale the chart\nto the app\'s own time. The frame details list it either way');
+        this._perfInspectorToggle.checked = true;
+        this._perfNote = el('div', 'pci-note pci-note-info');
+        this._perfNote.style.display = 'none';
+        perfPanel.append(perfBar, this._perfNote);
+        this._perfCharts = new PerfCharts(perfPanel, this._perf);
+        setTip(this._perfCharts.timelineElement, 'The frame shown, along its own time. The GPU passes are drawn back to back,\nas the GPU says how long each took but not when it ran');
+        this._perfCharts.onChange = () => this._onPerfChange();
+        this._perfCharts.onCollapse = () => this._saveSettings();
+        this._perfInspectorToggle.addEventListener('change', () => {
+            this._perfCharts.showInspector = this._perfInspectorToggle.checked;
+            this._perfCharts.invalidate();
+            this._saveSettings();
+        });
 
         // render targets: a live preview of the selected target, drawn over the canvas
         const targetPanel = el('div', 'pci-listpanel');
@@ -1630,6 +1799,7 @@ class Inspector {
             hierarchy: tree,
             assets: assetPanel,
             passes: passPanel,
+            perf: perfPanel,
             targets: targetPanel,
             textures: texturePanel,
             meshes: meshPanel,
@@ -1640,17 +1810,18 @@ class Inspector {
             shaders: shaderPanel,
             physics: physicsPanel
         };
-        this._hierarchyEl.append(tabs, filter, tree, cameraPanel, assetPanel, passPanel, targetPanel, texturePanel, meshPanel, materialPanel, scriptPanel, memoryPanel, shaderPanel, physicsPanel);
+        this._hierarchyEl.append(tabs, filter, tree, cameraPanel, assetPanel, passPanel, perfPanel, targetPanel, texturePanel, meshPanel, materialPanel, scriptPanel, memoryPanel, shaderPanel, physicsPanel);
 
         const splitter = el('div', 'pci-splitter');
         const properties = el('div', 'pci-properties');
         body.append(this._hierarchyEl, splitter, properties);
 
-        this._gpuToggle.addEventListener('change', () => {
-            const profiler = this._app.graphicsDevice.gpuProfiler;
-            if (profiler) profiler.enabled = this._gpuToggle.checked;
-            this._saveSettings();
-        });
+        this._gpuToggle.addEventListener('change', () => this._setGpuTimings(this._gpuToggle.checked));
+        this._perfGpuToggle.addEventListener('change', () => this._setGpuTimings(this._perfGpuToggle.checked));
+        if (!this._app.graphicsDevice.gpuProfiler) {
+            this._perfGpuToggle.disabled = true;
+            setTip(this._perfGpuToggle.parentElement, 'This device has no GPU profiler');
+        }
         this._passPreviewToggle.addEventListener('change', () => this._saveSettings());
         this._debugFrameToggle.addEventListener('change', () => this._setDebugFrame(this._debugFrameToggle.checked));
         this._freezeToggle.addEventListener('change', () => {
@@ -1708,7 +1879,12 @@ class Inspector {
         for (const type of SWALLOWED_EVENTS) {
             host.addEventListener(type, (e) => {
                 e.stopPropagation();
-                if (type === 'keydown' && !isTextTarget(e)) this._onKeyDown(/** @type {KeyboardEvent} */ (e));
+                if (type === 'keydown' && !isTextTarget(e)) {
+                    // the Performance tab steps through frames only while the panel has focus, so
+                    // the arrow keys stay the app's otherwise
+                    const key = /** @type {KeyboardEvent} */ (e);
+                    if (!this._onPerfKey(key)) this._onKeyDown(key);
+                }
             });
         }
 
@@ -1878,10 +2054,16 @@ class Inspector {
         }
         if (typeof stored.width === 'number') this._setWidth(stored.width);
         if (typeof stored.passPreview === 'boolean') this._passPreviewToggle.checked = stored.passPreview;
-        if (typeof stored.gpuTimings === 'boolean') {
-            this._gpuToggle.checked = stored.gpuTimings;
-            const profiler = this._app.graphicsDevice.gpuProfiler;
-            if (profiler) profiler.enabled = stored.gpuTimings;
+        if (typeof stored.gpuTimings === 'boolean') this._setGpuTimings(stored.gpuTimings);
+        if (Array.isArray(stored.perfCollapsed)) {
+            this._perfCharts.collapsed = new Set(stored.perfCollapsed.filter(key => typeof key === 'string'));
+        }
+        if (Array.isArray(stored.perfHidden)) {
+            this._perfCharts.hidden = new Set(stored.perfHidden.filter(key => typeof key === 'string'));
+        }
+        if (typeof stored.perfInspector === 'boolean') {
+            this._perfInspectorToggle.checked = stored.perfInspector;
+            this._perfCharts.showInspector = stored.perfInspector;
         }
         if (stored.targetPreview && typeof stored.targetPreview === 'object') {
             if (typeof stored.targetPreview.enabled === 'boolean') this._previewToggle.checked = stored.targetPreview.enabled;
@@ -1922,6 +2104,9 @@ class Inspector {
                 tab: this._tab,
                 width: this._width,
                 gpuTimings: this._gpuToggle.checked,
+                perfInspector: this._perfInspectorToggle.checked,
+                perfCollapsed: [...this._perfCharts.collapsed],
+                perfHidden: [...this._perfCharts.hidden],
                 passPreview: this._passPreviewToggle.checked,
                 targetPreview: { enabled: this._previewToggle.checked, channels: this._previewChannels.value },
                 texturePreview: { enabled: this._texturePreviewToggle.checked, channels: this._textureChannels.value },
@@ -2532,15 +2717,112 @@ class Inspector {
     }
 
     /**
+     * Turns the GPU profiler on or off, from either of the switches, which follow each other.
+     *
+     * @param {boolean} on - Whether to time the GPU.
+     * @private
+     */
+    _setGpuTimings(on) {
+        const profiler = this._app.graphicsDevice.gpuProfiler;
+        if (profiler) profiler.enabled = on;
+        this._gpuToggle.checked = on;
+        this._perfGpuToggle.checked = on;
+        this._saveSettings();
+        if (this._tab === 'perf') this._refreshLists(false);
+    }
+
+    /**
+     * Starts or stops recording frames for the Performance tab.
+     *
+     * @param {boolean} on - Whether to record.
+     * @private
+     */
+    _setRecording(on) {
+        if (on) this._perf.start();
+        else this._perf.stop();
+        this._perfCharts.invalidate();
+        this._refreshLists(false);
+    }
+
+    /**
+     * The frame shown or the frames selected on the Performance tab changed.
+     *
+     * @private
+     */
+    _onPerfChange() {
+        if (this._tab !== 'perf') return;
+        this._properties.refresh();
+        this._updatePerfBar();
+        this._updateStatus();
+    }
+
+    /**
+     * Brings the recording controls of the Performance tab and its note up to date.
+     *
+     * @private
+     */
+    _updatePerfBar() {
+        const capture = this._perf;
+        const recording = capture.recording;
+        const record = this._perfRecordBtn;
+        record.classList.toggle('pci-active', recording);
+        record.setAttribute('aria-label', recording ? 'Stop' : 'Record');
+        setTip(record, recording ? 'Stop recording, keeping the frames recorded' :
+            'Record every frame, adding to the capture, which keeps the last 1000');
+        this._perfLastBtn.classList.toggle('pci-active', this._perfCharts.following);
+        const profiler = this._app.graphicsDevice.gpuProfiler;
+        this._perfGpuToggle.checked = !!profiler?.enabled;
+
+        const notes = [];
+        if (!capture.detailed) notes.push('This engine build times the update and the render as a whole: the phases of the render and the breakdown of the draw calls need the profiler or debug engine.');
+        // the frames recorded keep the late timings after recording stops
+        if (profiler?.enabled && (recording || capture.count) && !capture.gpuExact) {
+            notes.push('This engine does not say which frame GPU timings belong to, so they land a few frames late.');
+        }
+        Inspector._setNote(this._perfNote, notes.join(' '));
+    }
+
+    /**
+     * Steps through the frames of the Performance tab with the arrow keys, Shift taking ten at a
+     * time; Home shows the first frame, End follows the newest and Escape unselects the frames
+     * selected together.
+     *
+     * @param {KeyboardEvent} e - A key pressed while the panel has focus.
+     * @returns {boolean} Whether the key was used.
+     * @private
+     */
+    _onPerfKey(e) {
+        if (this._tab !== 'perf' || this._debugFrame) return false;
+        const charts = this._perfCharts;
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            charts.step((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 10 : 1));
+        } else if (e.key === 'Home') {
+            charts.pick(this._perf.first);
+        } else if (e.key === 'End') {
+            charts.follow();
+        } else if (e.key === 'Escape' && charts.range) {
+            charts.clearRange();
+        } else {
+            return false;
+        }
+        e.preventDefault();
+        return true;
+    }
+
+    /**
      * Switches the list tab and points the property view at that tab's selection.
      *
-     * @param {'hierarchy'|'cameras'|'assets'|'passes'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'} tab - The tab.
+     * @param {'hierarchy'|'cameras'|'assets'|'passes'|'perf'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'} tab - The tab.
      * @private
      */
     _setTab(tab) {
         this._tab = tab;
         this._menu?.hide();
         this._filterBy.style.display = tab === 'hierarchy' ? '' : 'none';
+        // the Performance tab has no list to filter
+        this._filterEl.style.display = tab === 'perf' ? 'none' : '';
+        this._hierarchyEl.classList.toggle('pci-tall', tab === 'perf');
+        if (tab === 'perf') this._perfCharts.invalidate();
         this._updateFilterHint();
         for (const [id, button] of Object.entries(this._tabButtons)) {
             button.classList.toggle('pci-active', id === tab);
@@ -2641,6 +2923,12 @@ class Inspector {
             if (shader !== this._properties.subject) {
                 this._properties.setSubject(shader, this._shaderModel, this._shaderList.selectedKey);
             }
+        } else if (this._tab === 'perf') {
+            // the charts are the subject, so the view follows the frame they show
+            if (this._properties.subject !== this._perfCharts) {
+                this._properties.setSubject(this._perfCharts, this._perfModel, 'perf');
+            }
+            this._updatePerfBar();
         } else {
             if ((capture && !this._frozen) || !this._frame) {
                 this._frame = captureFrameGraph(this._app);
@@ -2724,7 +3012,7 @@ class Inspector {
      */
     _onContextMenu = (e) => {
         if (isTextTarget(e)) return;
-        const copy = this._copyTargetAt(/** @type {Node} */ (e.composedPath()[0]));
+        const copy = this._copyTargetAt(/** @type {Node} */ (e.composedPath()[0]), e);
         if (!copy) return;
         e.preventDefault();
         this._menu?.show(e.clientX, e.clientY, copy.title, this._copyItems(copy));
@@ -2738,13 +3026,18 @@ class Inspector {
      * everything it lists is copied.
      *
      * @param {Node} target - What was right-clicked.
+     * @param {MouseEvent} [e] - The click, for where it was on the charts of the Performance tab.
      * @returns {CopyTarget|null} What to copy, or null for a part of the panel nothing is copied
      * from, such as the toolbar.
      * @private
      */
-    _copyTargetAt(target) {
+    _copyTargetAt(target, e) {
         const property = this._properties.copyTargetAt(target);
         if (property) return property;
+
+        // the charts and the timeline of the Performance tab copy what is under the pointer
+        const perf = this._tab === 'perf' && e ? this._perfCharts.copyAt(target, e) : null;
+        if (perf) return this._perfCopy(perf);
 
         const node = this._hierarchy.nodeAt(target);
         if (node) {
@@ -2776,6 +3069,7 @@ class Inspector {
      */
     _tabCopyTarget(tab) {
         const title = this._tabButtons[tab].textContent ?? tab;
+        if (tab === 'perf') return this._perf.count ? this._perfCopy({ kind: 'capture' }) : null;
         if (tab === 'hierarchy') {
             const root = this._app.root;
             return { title, copy: options => copySubject(root, buildNodeModel(root), options) };
@@ -2791,6 +3085,16 @@ class Inspector {
      * @private
      */
     _copyItems(copy) {
+        // figures have no links to follow, so they are copied as they are, or as CSV
+        if (copy.plain) {
+            /** @type {MenuItem[]} */
+            const items = [{ text: () => 'Copy as JSON', title: 'Copy it with numbers at full precision', run: () => this._copy(copy, 0) }];
+            const csv = copy.csv;
+            if (csv) {
+                items.push({ text: () => 'Copy as CSV', title: 'Copy it a row per frame, to paste into a spreadsheet', run: () => this._copyText(csv, 'CSV') });
+            }
+            return items;
+        }
         const levels = n => `${n} level${n === 1 ? '' : 's'}`;
         return [{
             text: () => 'Copy as JSON',
@@ -2855,6 +3159,33 @@ class Inspector {
         const size = formatBytes(text.length);
         const note = `Copied ${result.objects ? `${result.objects} object${result.objects === 1 ? '' : 's'}, ` : ''}${size}` +
             `${result.truncated ? ', stopped at the object limit' : ''}`;
+        this._writeClipboard(text, note);
+    }
+
+    /**
+     * Copies text made on demand, such as CSV.
+     *
+     * @param {() => string} make - Makes the text.
+     * @param {string} what - What it is, for the note saying it was copied.
+     * @private
+     */
+    _copyText(make, what) {
+        let text;
+        try {
+            text = make();
+        } catch (e) {
+            this._menu?.note(`Could not copy: ${e?.message ?? e}`);
+            return;
+        }
+        this._writeClipboard(text, `Copied ${what}, ${formatBytes(text.length)}`);
+    }
+
+    /**
+     * @param {string} text - The text.
+     * @param {string} note - What the menu says once it is copied.
+     * @private
+     */
+    _writeClipboard(text, note) {
         // the clipboard of the window the panel is in, which is the one with focus once popped out
         const clipboard = (this._panel.ownerDocument.defaultView ?? window).navigator.clipboard;
         if (!clipboard) {
@@ -2865,6 +3196,48 @@ class Inspector {
             () => this._menu?.note(note),
             e => this._menu?.note(`Could not copy: ${e?.message ?? e}`)
         );
+    }
+
+    /**
+     * What a right click on the Performance tab copies, as the charts tell it: the capture, a
+     * series, a frame, the frames selected together, or the timeline. A capture and a series
+     * cover the frames selected together, or every frame kept.
+     *
+     * @param {{ kind: string, key?: string, seq?: number }} what - What to copy.
+     * @returns {CopyTarget|null} The copy, or null for nothing.
+     * @private
+     */
+    _perfCopy(what) {
+        const capture = this._perf;
+        const charts = this._perfCharts;
+        const { from, to } = charts.copyRange;
+        const frames = charts.range ? `, frames ${from + 1}–${to + 1}` : '';
+        const figures = json => ({ json, objects: 0, truncated: false });
+        switch (what.kind) {
+            case 'capture': {
+                const device = this._app.graphicsDevice;
+                const info = { type: device.deviceType, width: device.width, height: device.height, maxPixelRatio: device.maxPixelRatio };
+                return { title: `Performance${frames}`, plain: true, copy: () => figures(captureJson(capture, from, to, info)) };
+            }
+            case 'series': {
+                const name = PERF_SERIES_NAMES[what.key] ?? what.key;
+                return {
+                    title: `${name}${frames}`,
+                    plain: true,
+                    copy: () => figures({ series: name, range: { from: from + 1, to: to + 1, frames: to - from + 1 }, rows: seriesRows(capture, what.key, from, to) }),
+                    csv: () => toCsv(seriesRows(capture, what.key, from, to))
+                };
+            }
+            case 'frame':
+                return { title: `Frame ${what.seq + 1}`, plain: true, copy: () => figures(frameJson(capture, what.seq)) };
+            case 'range':
+                return { title: `Frames ${from + 1}–${to + 1}`, plain: true, copy: () => figures(rangeJson(capture, from, to)) };
+            case 'timeline': {
+                const json = charts.timelineJson();
+                return json ? { title: `${json.title}, timeline`, plain: true, copy: () => figures(json) } : null;
+            }
+        }
+        return null;
     }
 
     /**
@@ -3098,6 +3471,22 @@ class Inspector {
                 selected = item instanceof LayerStepSelection ?
                     `${passDisplayName(item.pass)} › ${item.step.layer.name} ${item.step.transparent ? 'transparent' : 'opaque'}` :
                     item ? passDisplayName(item) : '';
+                break;
+            }
+            case 'perf': {
+                const capture = this._perf;
+                const charts = this._perfCharts;
+                counts = `${capture.recording ? 'Recording' : 'Stopped'} · ${capture.count} frames`;
+                if (capture.count) {
+                    const { median } = captureNorms(capture);
+                    let hitches = 0;
+                    for (let seq = capture.first; seq < capture.end; seq++) {
+                        if (isHitch(capture, seq, median)) hitches++;
+                    }
+                    counts += ` · median ${formatMs(median)} · ${hitches} hitch${hitches === 1 ? '' : 'es'}`;
+                    selected = charts.range ? `Frames ${charts.range.from + 1}–${charts.range.to + 1}` :
+                        `Frame ${charts.shown + 1}${charts.following ? ', the newest' : ''}`;
+                }
                 break;
             }
             case 'targets': {
