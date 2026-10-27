@@ -765,6 +765,38 @@ describe('Performance GPU passes', function () {
         expect(bars.find(bar => bar.lane === 'gpu' && bar.name === 'Downsample').run).to.equal(3);
         charts.destroy();
     });
+
+    it('keeps the passes a forward pass renders first, its internal before-passes, apart from it', function () {
+        // engine 2.24 renders the directional shadows of a forward pass as its internal
+        // before-passes; they are what the frame needs ahead of the pass, so they are not grouped
+        // under it as the passes of an effect are
+        const app = createApp();
+        const profiler = { enabled: true, frameTime: undefined, renderVersion: -1, passTimings: new Map(), passTimingsInOrder: { names: [], times: [] } };
+        app.graphicsDevice.gpuProfiler = profiler;
+        const shadow = pass('RenderPassShadowDirectional');
+        const forward = { ...pass('RenderPassForward'), internalBeforePasses: [shadow] };
+        const compose = pass('RenderPassCompose');
+        app.frameGraph = { passes: [shadow, forward, compose] };
+        const capture = new PerfCapture(app);
+        capture.start();
+        tick(app);
+        tick(app);
+        profiler.frameTime = 2;
+        profiler.renderVersion = 1;
+        profiler.passTimingsInOrder = { names: ['ShadowDirectional', 'Forward', 'Compose'], times: [0.3, 1, 0.2] };
+        tick(app);
+
+        // matched to the frame graph, each a pass of its own
+        expect(capture.passesInOrder(0).map(p => [p.name, p.owner, p.occurrence])).to.deep.equal([
+            ['ShadowDirectional', null, 0], ['Forward', null, 0], ['Compose', null, 0]
+        ]);
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        charts.pick(0);
+        const bars = charts._timelineModel().bars;
+        expect(bars.filter(bar => bar.lane === 'gpu').map(bar => bar.name)).to.deep.equal(['ShadowDirectional', 'Forward', 'Compose']);
+        expect(bars.filter(bar => bar.lane === 'gpuPasses')).to.have.length(0);
+        charts.destroy();
+    });
 });
 
 describe('Performance scripts', function () {

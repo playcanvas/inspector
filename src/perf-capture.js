@@ -199,8 +199,10 @@ function profilerName(pass) {
 
 /**
  * @param {any} pass - A frame pass.
- * @returns {any[]} The passes it runs around itself: its before and after passes, and the passes
- * of each view of a multi-view pass.
+ * @returns {any[]} The passes it runs around itself as an effect does: its before and after
+ * passes, and the passes of each view of a multi-view pass. Its internal before-passes are left
+ * out: they are what the frame needs ahead of it, such as the directional shadows of a forward
+ * pass, so they stay passes of their own rather than grouping the pass as an effect.
  */
 function nestedPasses(pass) {
     return [...pass.beforePasses ?? [], ...pass.afterPasses ?? [], ...(Array.isArray(pass.children) ? pass.children : [])];
