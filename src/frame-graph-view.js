@@ -254,7 +254,8 @@ function instancePage(list, key, ctx) {
 // pass properties the model shows explicitly, or that are plumbing
 const SKIP_PASS = [
     'name', 'enabled', 'executeEnabled', 'requiresCubemaps', 'device', 'renderTarget', 'colorOps',
-    'colorArrayOps', 'depthStencilOps', 'beforePasses', 'afterPasses', 'children', 'samples',
+    'colorArrayOps', 'depthStencilOps', 'internalBeforePasses', 'beforePasses', 'afterPasses', 'children', 'samples',
+    'firstCameraUse', 'lastCameraUse',
     'scaleX', 'scaleY', 'options', 'fullSizeClearRect', 'layerRenderSteps', 'renderer', 'scene',
     'shadowRenderer'
 ];
@@ -332,7 +333,9 @@ function captureFrameGraph(app) {
     /** @type {Map<FramePass, FramePass>} */
     const parentOf = new Map();
     const mark = (pass) => {
-        const children = [...pass.beforePasses, ...pass.afterPasses, ...(Array.isArray(pass.children) ? pass.children : [])];
+        // the internal before-passes, which engines before 2.24 do not have, execute ahead of the
+        // before-passes
+        const children = [...pass.internalBeforePasses ?? [], ...pass.beforePasses, ...pass.afterPasses, ...(Array.isArray(pass.children) ? pass.children : [])];
         for (const child of children) {
             parentOf.set(child, pass);
             mark(child);
@@ -501,7 +504,8 @@ function passRows(frame, device) {
             const layer = step.layer;
             const enabled = layer.enabled && (pass.layerComposition?.isEnabled(layer, step.transparent) ?? true);
             const camera = step.cameraComponent?.entity;
-            const flags = `${step.firstCameraUse ? ' · first' : ''}${step.lastCameraUse ? ' · last' : ''}${enabled ? '' : ' · disabled'}`;
+            const use = cameraUse(step, i, pass);
+            const flags = `${use.first ? ' · first' : ''}${use.last ? ' · last' : ''}${enabled ? '' : ' · disabled'}`;
             rows.push({
                 key: `${entry.key}/${i}`,
                 item: new LayerStepSelection(pass, step, i),
@@ -638,11 +642,14 @@ function buildPassModel(pass, ctx) {
         const runs = Array.isArray(/** @type {any} */ (entry.parent).children) && /** @type {any} */ (entry.parent).children.includes(pass);
         push(general, runs ? 'run by' : 'owned by', { text: passDisplayName(entry.parent), cls: 'ref', target: entry.parent });
     }
+    const internalBeforePasses = /** @type {any} */ (pass).internalBeforePasses;
+    if (internalBeforePasses?.length) push(general, 'internal before passes', passList(internalBeforePasses));
     if (pass.beforePasses.length) push(general, 'before passes', passList(pass.beforePasses));
     if (pass.afterPasses.length) push(general, 'after passes', passList(pass.afterPasses));
     const children = /** @type {any} */ (pass).children;
     if (Array.isArray(children) && children.length) push(general, 'per-view passes', passList(children));
-    push(general, 'requires cubemaps', read(pass, 'requiresCubemaps'));
+    // engines from 2.24 no longer have the property
+    if (/** @type {any} */ (pass).requiresCubemaps !== undefined) push(general, 'requires cubemaps', read(pass, 'requiresCubemaps'));
     sections.push(general);
 
     const rt = entry ? entry.renderTarget : (pass.renderTarget === undefined ? undefined : (pass.renderTarget ?? device.backBuffer));
@@ -695,9 +702,10 @@ function buildPassModel(pass, ctx) {
             push(section, `[${i}] camera`, describeValue(step.cameraComponent?.entity ?? null));
             push(section, `[${i}] layer`, describeValue(layer));
             const list = ctx.frame?.visible?.get(step) ?? null;
+            const use = cameraUse(step, i, pass);
             push(section, `[${i}] draws`, {
                 text: `${step.transparent ? 'transparent' : 'opaque'}, ${drawnText(list, layer)}` +
-                    `${enabled ? '' : ', disabled'}${step.firstCameraUse ? ', first camera use' : ''}${step.lastCameraUse ? ', last camera use' : ''}`,
+                    `${enabled ? '' : ', disabled'}${use.first ? ', first camera use' : ''}${use.last ? ', last camera use' : ''}`,
                 cls: 'obj',
                 expand: list ? () => instancePage(list, `${ctx.passKey ?? ''}/${i}`, ctx) : undefined
             });
@@ -720,6 +728,27 @@ function buildPassModel(pass, ctx) {
  */
 function stepEnabled(step, pass) {
     return step.layer.enabled && (pass.layerComposition?.isEnabled(step.layer, step.transparent) ?? true);
+}
+
+/**
+ * Whether a layer render step of a forward pass is the first to render its camera in the frame,
+ * and whether it is the last. Engines before 2.24 keep these flags on each step. Later ones keep
+ * them on the pass, which renders a single camera, so they belong to its first and its last step.
+ *
+ * @param {*} step - A layer render step.
+ * @param {number} index - The index of the step in its pass.
+ * @param {RenderPassForward} pass - The pass it belongs to.
+ * @returns {{ first: boolean, last: boolean }} The flags.
+ */
+function cameraUse(step, index, pass) {
+    const forward = /** @type {any} */ (pass);
+    if (forward.firstCameraUse === undefined) {
+        return { first: !!step.firstCameraUse, last: !!step.lastCameraUse };
+    }
+    return {
+        first: !!forward.firstCameraUse && index === 0,
+        last: !!forward.lastCameraUse && index === pass.layerRenderSteps.length - 1
+    };
 }
 
 /**
@@ -748,8 +777,9 @@ function buildStepModel(selection, ctx) {
     push(general, 'draws', { text: drawnText(list, layer), cls: list ? 'num' : 'null' });
     push(general, 'enabled', describeValue(enabled));
     push(general, 'clears', { text: clears || 'nothing', cls: clears ? 'obj' : 'null' });
-    if (step.firstCameraUse) push(general, 'first camera use', describeValue(true));
-    if (step.lastCameraUse) push(general, 'last camera use', describeValue(true));
+    const use = cameraUse(step, index, pass);
+    if (use.first) push(general, 'first camera use', describeValue(true));
+    if (use.last) push(general, 'last camera use', describeValue(true));
     if (ctx.debug?.stepKey === ctx.passKey && list) {
         push(general, 'debug frame', { text: `stops after draw ${ctx.debug.index} of ${list.instances.length}`, cls: 'num' });
     }

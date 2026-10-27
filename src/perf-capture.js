@@ -199,11 +199,12 @@ function profilerName(pass) {
 
 /**
  * @param {any} pass - A frame pass.
- * @returns {any[]} The passes it runs around itself: its before and after passes, and the passes
- * of each view of a multi-view pass.
+ * @returns {any[]} The passes it runs around itself: its internal before-passes, which engines
+ * before 2.24 do not have, its before and after passes, and the passes of each view of a
+ * multi-view pass.
  */
 function nestedPasses(pass) {
-    return [...pass.beforePasses ?? [], ...pass.afterPasses ?? [], ...(Array.isArray(pass.children) ? pass.children : [])];
+    return [...pass.internalBeforePasses ?? [], ...pass.beforePasses ?? [], ...pass.afterPasses ?? [], ...(Array.isArray(pass.children) ? pass.children : [])];
 }
 
 /**

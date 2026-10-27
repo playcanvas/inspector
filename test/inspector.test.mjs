@@ -2366,6 +2366,68 @@ describe('Inspector frame graph capture', function () {
 
         expect(captureFrameGraph(app).entries.map(e => e.pass)).to.deep.equal([forward]);
     });
+
+    it('nests the internal before-passes under their pass, ahead of its before-passes', function () {
+        const shadowMap = { name: 'ShadowMap' };
+        const shadow = pass('RenderPassShadowDirectional', { renderTarget: shadowMap });
+        const before = pass('UserBefore');
+        const { app, forward } = forwardScene([instance('wall')]);
+        forward.internalBeforePasses = [shadow];
+        forward.beforePasses = [before];
+        app.frameGraph.passes = [shadow, before, forward];
+
+        const frame = captureFrameGraph(app);
+        expect(frame.entries.map(e => e.parent)).to.deep.equal([forward, forward, null]);
+        expect(frame.entries.map(e => e.depth)).to.deep.equal([1, 1, 0]);
+        expect(frame.entries[2].children).to.equal(2);
+
+        const ctx = { device: app.graphicsDevice, frame, pages: new Map(), filter: '', stable: true };
+        const general = buildPassModel(forward, ctx).find(section => section.key === 'pass');
+        const labels = general.rows.map(row => row.label);
+        expect(labels.indexOf('internal before passes')).to.be.below(labels.indexOf('before passes'));
+        // listed once, not again among the other properties
+        const props = buildPassModel(forward, ctx).find(section => section.key === 'props');
+        expect(props?.rows.map(row => row.label) ?? []).to.not.include('internalBeforePasses');
+    });
+
+    it('reads the camera use from a forward pass, or from its steps on engines before 2.24', function () {
+        const { app, forward, step } = forwardScene([instance('wall')]);
+        const second = { ...step, transparent: true };
+        forward.layerRenderSteps = [step, second];
+        const flags = () => {
+            const frame = captureFrameGraph(app);
+            const [, ...stepRows] = passRows(frame, app.graphicsDevice);
+            const ctx = { device: app.graphicsDevice, frame, pages: new Map(), filter: '', stable: true };
+            return stepRows.map((row) => {
+                const labels = buildStepModel(row.item, { ...ctx, passKey: row.key })[0].rows.map(r => r.label);
+                return [row.cells.at(-1).text.includes('· first'), row.cells.at(-1).text.includes('· last'),
+                    labels.includes('first camera use'), labels.includes('last camera use')];
+            });
+        };
+
+        // the pass renders a single camera, so its flags belong to its first and its last step
+        forward.firstCameraUse = true;
+        forward.lastCameraUse = true;
+        expect(flags()).to.deep.equal([[true, false, true, false], [false, true, false, true]]);
+        forward.firstCameraUse = false;
+        expect(flags()).to.deep.equal([[false, false, false, false], [false, true, false, true]]);
+
+        // engines before 2.24 flag each step
+        delete forward.firstCameraUse;
+        delete forward.lastCameraUse;
+        second.firstCameraUse = true;
+        second.lastCameraUse = true;
+        expect(flags()).to.deep.equal([[false, false, false, false], [true, true, true, true]]);
+    });
+
+    it('shows whether a pass requires cubemaps only on engines before 2.24, which have the property', function () {
+        const app = /** @type {any} */ ({ graphicsDevice: { backBuffer: {}, gpuProfiler: null }, frameGraph: { passes: [] } });
+        const ctx = { device: app.graphicsDevice, frame: null, pages: new Map(), filter: '', stable: true };
+        const labels = p => buildPassModel(p, ctx).find(section => section.key === 'pass').rows.map(row => row.label);
+
+        expect(labels(pass('Current'))).to.not.include('requires cubemaps');
+        expect(labels(pass('Earlier', { requiresCubemaps: false }))).to.include('requires cubemaps');
+    });
 });
 
 describe('Inspector viewport tools', function () {
