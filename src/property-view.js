@@ -14,6 +14,9 @@ import { setTip } from './tooltip.js';
  * @ignore
  * @property {string} title - What is copied, as the menu names it.
  * @property {(options: CopyOptions) => CopyResult} copy - Makes the copy.
+ * @property {boolean} [plain] - Whether it has no links to follow, so the menu offers no deeper
+ * copies, as the figures of the Performance tab.
+ * @property {() => string} [csv] - Makes the copy as CSV, for a series of frames.
  */
 
 /**

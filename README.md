@@ -10,10 +10,10 @@
 | [User Manual](https://developer.playcanvas.com) | [Blog](https://blog.playcanvas.com) | [Forum](https://forum.playcanvas.com) |
 
 A debug panel for running [PlayCanvas](https://github.com/playcanvas/engine) apps. It shows the entity
-hierarchy and every component's properties, and tabs for the cameras, assets, frame graph, render
-targets, textures, meshes, materials, scripts, memory, shaders and physics of the app, with live
-previews of textures and render targets, picking and flying in the view, and a debug frame mode
-that steps through the draw calls of a render pass.
+hierarchy and every component's properties, and tabs for the cameras, assets, frame graph,
+performance, render targets, textures, meshes, materials, scripts, memory, shaders and physics of
+the app, with live previews of textures and render targets, picking and flying in the view, and a
+debug frame mode that steps through the draw calls of a render pass.
 
 The inspector is read-only, apart from toggling entities on and off, pausing and stepping the app,
 and view-only overrides (render modes, wireframe, a flown or orbited camera) it removes when it
@@ -63,6 +63,43 @@ needs the debug build of the engine.
 
 ![Stepping through the draws of a layer one at a time](docs/images/debug-frame.webp)
 
+### Record performance
+
+On the Performance tab, press the record button (a ring around a dot) to capture every frame, up to
+the last 1000; it shows red while recording, and pressing it again stops. The button beside it
+clears the capture. Charts cover
+the whole capture: the frame interval, the CPU time on the main thread by phase, the GPU time and
+the draw calls by kind. Below them, the Memory chart draws the JavaScript heap, the video memory and
+each kind of it as lines sharing a scale, and the Resources chart the count of textures, render
+targets, shaders, buffers and pipelines; untick a line in the list beside a chart to hide it, and
+the chart rescales to the others. The Events section has a row, which can be unticked too, for each
+kind of event, marking the frames that had one: hitches (frames taking over twice the median), long
+animation frames, shaders compiled, garbage collections, resources created or destroyed, assets
+loaded and the app's own measures. Click the name of a chart or a section to collapse it. Hover a
+mark for what happened, or a chart for the figures of the frame under the pointer. A dashed line
+marks the display interval on the Frame, CPU and GPU charts, which are scaled to show it.
+
+Click a frame, or a mark, to show it on a timeline of its own, and everything recorded for it below:
+what held it back, the CPU time by phase, the GPU time of each pass, the work it submitted, memory
+and resources, and its events. The timeline is a flame chart: the update, post-update, inspector
+and render of the CPU, with the physics step, the animation and the phases of the render under
+them, then the GPU passes and the events. With frames selected together, it shows their average
+frame. Scroll over the timeline to zoom into part of the frame, drag the scrollbar under it to pan
+and double-click it to see the whole frame again. Drag across the charts to select frames together,
+with their averages, 95th percentiles and largest figures; scroll to zoom, drag the scrollbar under
+the charts to pan and double-click to see the whole capture again. **‹** and **›** step a frame,
+**«** shows the first and **»** the newest, following it as frames are recorded. While the panel has
+focus, the arrow keys step a frame (ten with <kbd>Shift</kbd>), <kbd>Home</kbd> shows the first and
+<kbd>End</kbd> follows the newest.
+
+Turn on **GPU timings** to record the GPU time. An engine whose GPU profiler does not say which
+frame its timings belong to, such as 2.23, gets them a few frames late, which the tab notes. The
+inspector runs inside the app's update, so its own time is shown apart, as Inspector; turn off
+**Inspector time** to leave it out of the CPU chart, which then scales to the app's own time. The
+release engine times the update and the render as a whole; the profiler and debug engines add the
+phases of the render and the breakdown of the draw calls. Spans the app measures with
+`performance.measure` show on the timeline of their frame.
+
 ### Edit transforms
 
 Click a position, rotation or the local scale in the Transform section of an entity to edit it as
@@ -83,6 +120,12 @@ textures, up to N links away; **Copy all levels** follows every link, so copying
 the whole hierarchy. A link that is not followed is named by `$type` and its name or id, and
 marked `$stub`; an object already copied elsewhere in the copy is marked `$ref`. A node's parent
 and the lists of what uses an object are left out, so a copy never climbs out of what was copied.
+
+On the Performance tab, right-click the name of the tab to copy the whole capture, every frame with
+all it recorded, or the name of a chart or section, or a line of its list, to copy that series a row
+per frame, as JSON or as CSV for a spreadsheet; both cover the frames selected together when there
+are any. Right-click a frame in the charts to copy it, inside the frames selected together to copy
+their figures, and the timeline to copy its bars.
 
 ## Engine versions
 
