@@ -11,8 +11,8 @@ import { EVENT_KINDS, captureNorms, eventLines, eventMask, isHitch, rangeStats }
 const SERIES = {
     frame: [['interval', 'interval']],
     cpu: [
-        ['total', 'cpu'], ['update', 'update'], ['systems', 'cpuSystems'], ['physics', 'physics'],
-        ['animation', 'anim'], ['postUpdate', 'post'], ['otherUpdate', 'cpuOther'], ['render', 'render'],
+        ['total', 'cpu'], ['update', 'update'], ['systems', 'cpuSystems'], ['scripts', 'scripts'], ['physics', 'physics'],
+        ['animation', 'anim'], ['postUpdate', 'cpuPost'], ['otherUpdate', 'cpuOther'], ['render', 'render'],
         ['inspector', 'inspector']
     ],
     gpu: [['gpu', 'gpu']],
@@ -57,12 +57,13 @@ function put(out, capture, slot, figures) {
 /**
  * @param {PerfCapture} capture - The capture.
  * @param {number} seq - A kept frame.
- * @returns {Record<string, number>} Its GPU passes by name, empty until its timings resolved.
+ * @returns {Record<string, number>} Its GPU passes by name, those sharing a name summed, empty
+ * until its timings resolved.
  */
 function passesOf(capture, seq) {
     /** @type {Record<string, number>} */
     const passes = {};
-    for (const pass of capture.passesInOrder(seq)) passes[pass.name] = pass.time;
+    for (const pass of capture.passesInOrder(seq)) passes[pass.name] = (passes[pass.name] ?? 0) + pass.time;
     return passes;
 }
 
@@ -90,11 +91,19 @@ function frameJson(capture, seq) {
     if (capture.detailed) frame.cpu.renderPhases = put({}, capture, s, RENDER_PHASES);
     if (d.splatSort[s] > 0) frame.cpu.splatSortOnWorker = d.splatSort[s];
 
-    if (Number.isFinite(d.gpu[s])) frame.gpu = { frame: d.gpu[s], passes: passesOf(capture, seq) };
+    if (Number.isFinite(d.gpu[s])) {
+        frame.gpu = {
+            frame: d.gpu[s],
+            // summed by name, and each apart in the order they ran, with the effect running it
+            passes: passesOf(capture, seq),
+            passList: capture.passesInOrder(seq).map(pass => ({ name: pass.name, time: pass.time, ...(pass.owner ? { effect: pass.owner } : {}) }))
+        };
+    }
     frame.draws = put({}, capture, s, SERIES.draws);
     frame.memory = put({}, capture, s, SERIES.memory);
     frame.resources = put({}, capture, s, SERIES.resources);
     if (d.compiles[s] > 0) frame.shaderCompiles = { count: d.compiles[s], time: d.compileTime[s] };
+    if (capture.scriptFigures(seq)) frame.scripts = scriptsJson(capture, seq);
 
     const events = capture.events(seq);
     if (events.length) {
@@ -111,6 +120,39 @@ function frameJson(capture, seq) {
 
 /**
  * @param {PerfCapture} capture - The capture.
+ * @param {number} seq - A kept frame scripts were timed in.
+ * @returns {object} The scripts' own time in the frame, in all and in the update, post-update and
+ * initializing, their calls, the estimated cost of timing them, and each script type's times.
+ */
+function scriptsJson(capture, seq) {
+    const s = capture.slot(seq);
+    const d = capture.data;
+    /** @type {Record<string, object>} */
+    const types = {};
+    for (const type of capture.scripts(seq)) {
+        types[type.name] = {
+            update: type.update,
+            postUpdate: type.post,
+            initialize: type.init,
+            calls: type.calls,
+            updateCalls: type.updateCalls,
+            postUpdateCalls: type.postCalls,
+            initializeCalls: type.initCalls
+        };
+    }
+    return {
+        total: d.scriptsTotal[s],
+        update: d.scriptsUpdate[s],
+        postUpdate: d.scriptsPost[s],
+        initialize: d.scriptsInit[s],
+        calls: d.scriptCalls[s],
+        timingCost: d.scriptCost[s],
+        types
+    };
+}
+
+/**
+ * @param {PerfCapture} capture - The capture.
  * @param {number} from - The first frame.
  * @param {number} to - The last frame, inclusive.
  * @returns {object} What the frames have in common: how many, and the norms they are judged by.
@@ -122,7 +164,8 @@ function header(capture, from, to) {
         medianFrame: median,
         displayInterval: budget,
         engineBuild: capture.detailed ? 'profiler or debug' : 'release',
-        gpuTimingsExact: capture.gpuExact
+        gpuTimingsExact: capture.gpuExact,
+        ...(Number.isFinite(capture.clockStep) ? { clockStep: capture.clockStep } : {})
     };
 }
 
@@ -143,12 +186,13 @@ function captureJson(capture, from, to, device) {
 
 /**
  * The series of a chart or section, a row per frame: the frame and its figures. The GPU series
- * has a column per pass, and the events series lists only the frames that had events, with what
- * happened by kind.
+ * has a column per pass, the scripts series a column per script type and only the frames that
+ * timed scripts, and the events series lists only the frames that had events, with what happened
+ * by kind.
  *
  * @param {PerfCapture} capture - The capture.
- * @param {string} key - The chart or section: 'frame', 'cpu', 'gpu', 'draws', 'memory',
- * 'resources' or 'events'.
+ * @param {string} key - The chart or section: 'frame', 'cpu', 'gpu', 'draws', 'scripts',
+ * 'memory', 'resources' or 'events'.
  * @param {number} from - The first frame.
  * @param {number} to - The last frame, inclusive.
  * @returns {object[]} The rows.
@@ -165,6 +209,14 @@ function seriesRows(capture, key, from, to) {
             EVENT_KINDS.forEach((kind, i) => {
                 if (mask & (1 << i)) row[kind.key] = eventLines(capture, seq, kind.key);
             });
+            rows.push(row);
+            continue;
+        }
+        if (key === 'scripts') {
+            if (!capture.scriptFigures(seq)) continue;
+            /** @type {any} */
+            const row = { frame: seq + 1, total: capture.data.scriptsTotal[s] };
+            for (const type of capture.scripts(seq)) row[type.name] = type.update + type.post + type.init;
             rows.push(row);
             continue;
         }
@@ -232,7 +284,7 @@ function rangeJson(capture, from, to) {
     const interval = stats('interval');
     /** @type {any} */
     const out = { ...header(capture, from, to), fps: interval ? 1000 / interval.avg : null, hitches };
-    for (const [name, key] of [['interval', 'interval'], ['cpu', 'cpu'], ['gpu', 'gpu'], ['inspector', 'inspector'], ['draws', 'draws'], ['videoMemory', 'vram'], ['jsHeap', 'heap']]) {
+    for (const [name, key] of [['interval', 'interval'], ['cpu', 'cpu'], ['gpu', 'gpu'], ['inspector', 'inspector'], ['scripts', 'scriptsTotal'], ['draws', 'draws'], ['videoMemory', 'vram'], ['jsHeap', 'heap']]) {
         const figure = stats(key);
         if (figure) out[name] = figure;
     }

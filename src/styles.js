@@ -587,10 +587,11 @@ ${ICON_RULES}
         color: #ff5a52;
     }
 
+    /* shrinks with the part above the splitter, scrolling its charts */
     .pci-perf-charts {
         flex: 1 1 auto;
         position: relative;
-        min-height: 200px;
+        min-height: 60px;
         margin: 6px 8px 0;
         overflow-x: hidden;
         overflow-y: auto;
@@ -694,6 +695,11 @@ ${ICON_RULES}
         background: rgba(255, 255, 255, 0.1);
         color: #ffffff;
         font-weight: 600;
+    }
+
+    .pci-perf-hover-line.pci-nested {
+        padding-left: 25px;
+        color: #93a2a6;
     }
 
     .pci-perf-hover-line.pci-indent.pci-strong {
@@ -987,7 +993,10 @@ ${ICON_RULES}
         color: var(--pci-text-faint);
     }
 
+    /* above anything of the part over it that overflows, so it can always be dragged back */
     .pci-splitter {
+        position: relative;
+        z-index: 2;
         flex: 0 0 5px;
         background: var(--pci-raised);
         border-top: 1px solid var(--pci-border-strong);

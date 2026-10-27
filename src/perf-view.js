@@ -1,6 +1,7 @@
 import { formatBytes, makeSection } from './model.js';
+import { SCRIPT_CALLS, SCRIPT_STRIDE } from './perf-capture.js';
 
-/** @import { PerfCapture } from './perf-capture.js' */
+/** @import { PerfCapture, PerfGpuPass } from './perf-capture.js' */
 /** @import { Described } from './describe.js' */
 /** @import { PropertySection } from './model.js' */
 
@@ -33,6 +34,21 @@ import { formatBytes, makeSection } from './model.js';
  * or null.
  * @property {{ supported: boolean, enabled: boolean, enable: () => void }} gpu - The GPU profiler:
  * whether the device has one, whether it is on, and how to turn it on.
+ * @property {{ enabled: boolean, enable: () => void, rows?: number, pinned?: ReadonlySet<string>, pin?: (name: string) => void }} [scripts] - Script
+ * timing: whether it is on and how to turn it on; how many of the longest script types the
+ * Scripts chart gives a band of their own, besides those pinned; the names of those pinned; and
+ * how to pin or unpin one.
+ */
+
+/**
+ * @typedef {object} PerfScriptLegend
+ * @ignore
+ * @property {{ id: number, name: string, color: string, pinned: boolean }[]} types - The script
+ * types with a band of their own in the Scripts chart, top down: those pinned, then the longest of
+ * the others, each by its index into {@link PerfCapture#scriptNames}.
+ * @property {Map<number, string>} colors - The color of each of them, by id.
+ * @property {number} others - How many more types took time, sharing one band.
+ * @property {string} signature - The types in order, telling when the bands change.
  */
 
 /**
@@ -46,12 +62,13 @@ const CPU_PARTS = [
         key: 'systems',
         name: 'Systems',
         color: '#3d8bff',
-        tip: 'Component systems and scripts updating',
+        tip: 'Component systems updating, with the scripts unless they are timed apart',
         channel: 'cpuSystems'
     },
+    { key: 'scripts', name: 'Scripts', color: '#ffcc00', tip: 'Scripts updating and post-updating, while Script timing is on', channel: 'scripts' },
     { key: 'physics', name: 'Physics', color: '#ff9500', tip: 'The physics step, part of the systems update', channel: 'physics' },
     { key: 'anim', name: 'Animation', color: '#00c7be', tip: 'Anim components updating', channel: 'anim' },
-    { key: 'post', name: 'Post-update', color: '#5ac8fa', tip: 'Systems and scripts post-updating', channel: 'post' },
+    { key: 'post', name: 'Post-update', color: '#5ac8fa', tip: 'Systems post-updating, with the scripts unless they are timed apart', channel: 'cpuPost' },
     {
         key: 'other',
         name: 'Other update',
@@ -115,12 +132,39 @@ const BOUND_SHARE = 0.85;
 // room to sort the values of a channel for its percentiles in; longer spans are sampled evenly
 const SCRATCH = new Float64Array(4096);
 
+// the colors of the script types with a band of their own, top down; later ones cycle through
+// them in lighter and then darker shades. The other types share one
+const SCRIPT_COLORS = ['#ffcc00', '#ff6482', '#64d2ff', '#30d158', '#bf5af2', '#ff9f0a', '#0a84ff', '#ff453a', '#66d4cf', '#ac8e68'];
+const OTHER_SCRIPTS_COLOR = '#8e8e93';
+
+// how many of the longest script types get a band of their own at first, and how many more each
+// Show more adds
+const SCRIPT_ROWS = 10;
+
+// no script types pinned, shared
+const NO_PINS = /** @type {ReadonlySet<string>} */ (new Set());
+
+// the most script types the frame details list one by one
+const MAX_SCRIPT_ROWS = 40;
+
+// a clock coarser than this, in milliseconds, makes the times of single script calls noisy
+const COARSE_CLOCK = 0.02;
+
 /**
  * The norms of each capture, kept until it records more.
  *
  * @type {WeakMap<PerfCapture, { version: number, norms: { budget: number, median: number } }>}
  */
 const normsCache = new WeakMap();
+
+/**
+ * The last legend of the Scripts chart made for each capture, kept while nothing it depends on
+ * changes: the frames recorded, the frames it ranks over, how many types it lists and those
+ * pinned.
+ *
+ * @type {WeakMap<PerfCapture, { key: string, legend: PerfScriptLegend }>}
+ */
+const legendCache = new WeakMap();
 
 /**
  * @param {number} ms - A duration in milliseconds.
@@ -190,6 +234,14 @@ function quantile(sorted, q) {
 }
 
 /**
+ * @param {number} n - A count of calls, or their mean over frames.
+ * @returns {string} The count, with a decimal for a mean that is not whole.
+ */
+function callCount(n) {
+    return `${Number.isInteger(n) ? formatCount(n) : n.toFixed(1)} ${n === 1 ? 'call' : 'calls'}`;
+}
+
+/**
  * @param {PerfCapture} capture - The capture.
  * @param {string} key - The channel.
  * @param {number} from - The first frame.
@@ -227,6 +279,77 @@ function captureNorms(capture) {
     const norms = { budget: quantile(sorted, 0.05), median: quantile(sorted, 0.5) };
     normsCache.set(capture, { version: capture.version, norms });
     return norms;
+}
+
+/**
+ * @param {number} index - The place of a script type among those with a band of their own.
+ * @returns {string} Its color: one of {@link SCRIPT_COLORS}, shaded lighter, then darker, on each
+ * time round them.
+ */
+function scriptColorAt(index) {
+    const base = SCRIPT_COLORS[index % SCRIPT_COLORS.length];
+    const round = Math.floor(index / SCRIPT_COLORS.length);
+    if (round === 0) return base;
+    const toward = round % 2 ? 255 : 0;
+    const amount = Math.min(0.6, Math.ceil(round / 2) * 0.3);
+    const channel = i => Math.round(parseInt(base.slice(1 + i * 2, 3 + i * 2), 16) * (1 - amount) + toward * amount);
+    return `rgb(${channel(0)}, ${channel(1)}, ${channel(2)})`;
+}
+
+/**
+ * The script types the Scripts chart gives a band of their own: those pinned, then the ones that
+ * took the longest over a span of frames, the frames selected together or the whole capture, so a
+ * selection around a spike brings forward the scripts behind it.
+ *
+ * @param {PerfCapture} capture - The capture.
+ * @param {number} from - The first frame the types are ranked over.
+ * @param {number} to - The last, inclusive.
+ * @param {number} rows - How many of the longest types get a band, besides those pinned.
+ * @param {ReadonlySet<string>} pinned - The names of the types pinned.
+ * @returns {PerfScriptLegend} The legend.
+ */
+function scriptLegend(capture, from, to, rows, pinned) {
+    const key = `${capture.version}|${from}|${to}|${rows}|${[...pinned].join('\n')}`;
+    const cached = legendCache.get(capture);
+    if (cached?.key === key) return cached.legend;
+    const names = capture.scriptNames;
+    const totals = new Float64Array(names.length);
+    for (let seq = Math.max(from, capture.first); seq <= to && seq < capture.end; seq++) {
+        const times = capture.scriptFigures(seq);
+        if (!times) continue;
+        for (let base = 0, id = 0; base < times.length; base += SCRIPT_STRIDE, id++) {
+            totals[id] += times[base] + times[base + 1] + times[base + 2];
+        }
+    }
+    const ids = [];
+    for (let id = 0; id < names.length; id++) {
+        if (totals[id] > 0 || pinned.has(names[id])) ids.push(id);
+    }
+    ids.sort((a, b) => totals[b] - totals[a]);
+    /** @type {PerfScriptLegend['types']} */
+    const types = [];
+    for (const id of ids) {
+        if (pinned.has(names[id])) types.push({ id, name: names[id], color: '', pinned: true });
+    }
+    let others = 0;
+    let ranked = 0;
+    for (const id of ids) {
+        if (pinned.has(names[id])) continue;
+        if (ranked < rows) {
+            types.push({ id, name: names[id], color: '', pinned: false });
+            ranked++;
+        } else {
+            others++;
+        }
+    }
+    const colors = new Map();
+    types.forEach((type, i) => {
+        type.color = scriptColorAt(i);
+        colors.set(type.id, type.color);
+    });
+    const legend = { types, colors, others, signature: types.map(type => type.id).join(',') };
+    legendCache.set(capture, { key, legend });
+    return legend;
 }
 
 /**
@@ -431,6 +554,7 @@ function rangeSection(selection) {
     figure('cpu', 'CPU', rangeStats(capture, 'cpu', from, to), formatMs);
     figure('gpu', 'GPU', rangeStats(capture, 'gpu', from, to), formatMs);
     figure('inspector', 'Inspector', rangeStats(capture, 'inspector', from, to), formatMs);
+    if (capture.supports.scripts) figure('scripts', 'Scripts', rangeStats(capture, 'scriptsTotal', from, to), formatMs);
     figure('draws', 'Draw calls', rangeStats(capture, 'draws', from, to), formatCount);
     figure('vram', 'Video memory', rangeStats(capture, 'vram', from, to), formatBytes);
     return section;
@@ -476,8 +600,10 @@ function buildPerfModel(selection) {
     const part = key => CPU_PARTS.find(p => p.key === key);
     const row = (key, label, ms, depth, swatch) => cpu.rows.push({ key, label, value: timing(ms, interval, swatch), depth });
     row('update', 'Update', d.update[s], 0);
-    for (const key of ['systems', 'physics', 'anim', 'post', 'other', 'inspector']) {
+    for (const key of ['systems', 'physics', 'scripts', 'anim', 'post', 'other', 'inspector']) {
         const p = part(key);
+        // the scripts only while they were timed apart
+        if (key === 'scripts' && !Number.isFinite(d.scripts[s])) continue;
         row(key, p.name, d[p.channel][s], key === 'physics' ? 2 : 1, p.color);
     }
     row('render', 'Render', d.render[s], 0, part('render').color);
@@ -491,9 +617,10 @@ function buildPerfModel(selection) {
         cpu.rows.push({ key: 'splatSort', label: 'Splat sort', value: value(`${formatMs(d.splatSort[s])} on a worker`, 'num', d.splatSort[s]) });
     }
     sections.push(cpu);
+    if (capture.supports.scripts) sections.push(scriptsSection(selection));
 
     const gpuSection = makeSection('gpu', 'GPU');
-    const passes = capture.passes(seq);
+    const passes = capture.passesInOrder(seq);
     if (passes.length) {
         // on WebGPU the frame spans the first pass beginning to the last ending, and pipelined
         // passes overlap, so the passes are shares of their own sum rather than of the frame
@@ -502,8 +629,18 @@ function buildPerfModel(selection) {
         if (sum > d.gpu[s] * 1.05) {
             gpuSection.rows.push({ key: 'sum', label: 'Passes', value: value(`${formatMs(sum)} summed, as passes overlap on the GPU`, 'num', sum) });
         }
-        for (const pass of passes) {
-            gpuSection.rows.push({ key: `pass:${pass.name}`, label: pass.name, value: value(`${formatMs(pass.time)} · ${formatShare(pass.time, sum)}`, 'num', pass.time), depth: 1 });
+        // the effects with the passes they run, and the passes of their own, longest first; passes
+        // sharing a name together, with the time of each
+        for (const group of gpuGroups(passes)) {
+            if (group.effect) {
+                gpuSection.rows.push({ key: `effect:${group.key}`, label: effectName(group.effect), value: value(`${formatMs(group.time)} · ${formatShare(group.time, sum)}`, 'num', group.time), depth: 1 });
+            }
+            for (const [name, times] of group.passes) {
+                const time = times.reduce((total, t) => total + t, 0);
+                const each = times.length > 1 ? ` · ${times.map(t => t.toFixed(2)).join(', ')}` : '';
+                const label = times.length > 1 ? `${name} ×${times.length}` : name;
+                gpuSection.rows.push({ key: `pass:${group.key}:${name}`, label, value: value(`${formatMs(time)} · ${formatShare(time, sum)}${each}`, 'num', time), depth: group.effect ? 2 : 1 });
+            }
         }
     } else {
         const off = gpu.supported && !gpu.enabled;
@@ -592,6 +729,140 @@ function buildPerfModel(selection) {
 }
 
 /**
+ * The script types of the frame shown, or of the frames selected together, each with its own time
+ * and the color it is drawn in, the longest first.
+ *
+ * @param {PerfSelection} selection - The selection.
+ * @returns {PropertySection} The section.
+ */
+function scriptsSection(selection) {
+    const { capture, seq, range } = selection;
+    const from = range ? Math.max(capture.first, range.from) : seq;
+    const to = range ? Math.min(capture.end - 1, range.to) : seq;
+    const section = makeSection('scripts', range ? `Scripts, frames ${from + 1}–${to + 1}` : 'Scripts');
+    const d = capture.data;
+    let timed = 0;
+    for (let f = from; f <= to; f++) {
+        if (capture.scriptFigures(f)) timed++;
+    }
+    if (!timed) {
+        const enabled = !!selection.scripts?.enabled;
+        const text = enabled ? 'not timed in this frame' : 'Script timing is off';
+        const enable = selection.scripts?.enable;
+        section.rows.push({ key: 'none', label: 'Timings', value: !enabled && enable ? { ...note(text), actions: [{ text: 'Turn on', title: 'Time each script type while recording', run: enable }] } : note(text) });
+        return section;
+    }
+
+    const names = capture.scriptNames;
+    // the colors the Scripts chart draws the types in, and the way to give one a band of its own
+    const view = selection.scripts;
+    const pinned = view?.pinned ?? NO_PINS;
+    const legend = scriptLegend(capture, range ? from : capture.first, range ? to : capture.end - 1, view?.rows ?? SCRIPT_ROWS, pinned);
+    const colorOf = id => legend.colors.get(id) ?? OTHER_SCRIPTS_COLOR;
+    const pinActions = (name) => {
+        const pin = view?.pin;
+        if (!pin) return undefined;
+        return pinned.has(name) ?
+            [{ text: 'Unpin', title: 'Take its own band in the Scripts chart away', run: () => pin(name) }] :
+            [{ text: 'Pin', title: 'Give it a band of its own in the Scripts chart, whatever its time', run: () => pin(name) }];
+    };
+    if (range) {
+        // each type's own time per frame, over the frames that timed scripts
+        const total = rangeStats(capture, 'scriptsTotal', from, to);
+        section.rows.push({ key: 'total', label: 'All scripts', value: { text: `avg ${formatMs(total.avg)} · p95 ${formatMs(total.p95)} · max ${formatMs(total.max)}`, cls: 'num', raw: total } });
+        // one pass over the frames sums each type and finds its largest; the 95th percentile, which
+        // sorts a type's frames, only for the types listed, as an app can have hundreds
+        const sums = new Float64Array(names.length);
+        const maxes = new Float64Array(names.length);
+        const calls = new Float64Array(names.length);
+        for (let f = from; f <= to; f++) {
+            const times = capture.scriptFigures(f);
+            if (!times) continue;
+            for (let base = 0, id = 0; base < times.length; base += SCRIPT_STRIDE, id++) {
+                const v = times[base] + times[base + 1] + times[base + 2];
+                sums[id] += v;
+                if (v > maxes[id]) maxes[id] = v;
+                calls[id] += times[base + SCRIPT_CALLS] + times[base + SCRIPT_CALLS + 1] + times[base + SCRIPT_CALLS + 2];
+            }
+        }
+        const ids = [];
+        for (let id = 0; id < names.length; id++) {
+            if (sums[id] > 0) ids.push(id);
+        }
+        ids.sort((a, b) => sums[b] - sums[a]);
+        for (const id of ids.slice(0, MAX_SCRIPT_ROWS)) {
+            let n = 0;
+            for (let f = from; f <= to && n < SCRATCH.length; f++) {
+                const v = capture.scriptTime(f, id);
+                if (Number.isFinite(v)) SCRATCH[n++] = v;
+            }
+            const type = { avg: sums[id] / timed, p95: quantile(SCRATCH.subarray(0, n).sort(), 0.95), max: maxes[id], calls: calls[id] / timed };
+            const described = value(`avg ${formatMs(type.avg)} · p95 ${formatMs(type.p95)} · max ${formatMs(type.max)} · ${callCount(type.calls)} a frame`, 'num', type);
+            described.swatch = colorOf(id);
+            described.actions = pinActions(names[id]);
+            section.rows.push({ key: `type:${names[id]}`, label: names[id], value: described, depth: 1 });
+        }
+        if (ids.length > MAX_SCRIPT_ROWS) section.rows.push({ key: 'more', label: '', value: note(`and ${ids.length - MAX_SCRIPT_ROWS} more`), depth: 1 });
+    } else {
+        const s = capture.slot(seq);
+        const interval = d.interval[s];
+        section.rows.push({ key: 'total', label: 'All scripts', value: timing(d.scriptsTotal[s], interval) });
+        const calls = d.scriptCalls[s];
+        section.rows.push({ key: 'calls', label: 'Calls', value: value(formatCount(calls), 'num', calls) });
+        if (d.scriptsInit[s] > 0) section.rows.push({ key: 'init', label: 'Initializing', value: timing(d.scriptsInit[s], interval) });
+        const types = capture.scripts(seq);
+        for (const type of types.slice(0, MAX_SCRIPT_ROWS)) {
+            const parts = [['update', type.update, type.updateCalls], ['post-update', type.post, type.postCalls], ['initialize', type.init, type.initCalls]];
+            const detail = parts.filter(([, , n]) => n > 0).map(([name, ms, n]) => `${name} ${formatMs(ms)} in ${callCount(n)}`).join(' · ');
+            const own = type.update + type.post + type.init;
+            const described = value(`${formatMs(own)} · ${detail}`, 'num', own);
+            described.swatch = colorOf(type.id);
+            described.actions = pinActions(type.name);
+            section.rows.push({ key: `type:${type.name}`, label: type.name, value: described, depth: 1 });
+        }
+        if (types.length > MAX_SCRIPT_ROWS) section.rows.push({ key: 'more', label: '', value: note(`and ${types.length - MAX_SCRIPT_ROWS} more`), depth: 1 });
+        if (d.scriptCost[s] > 0) {
+            const cost = d.scriptCost[s] < 0.01 ? 'under 0.01 ms' : `about ${formatMs(d.scriptCost[s])}`;
+            section.rows.push({ key: 'cost', label: 'Timing them', value: value(`${cost}, counted as the inspector's time`, 'num', d.scriptCost[s]) });
+        }
+    }
+    if (capture.clockStep > COARSE_CLOCK) {
+        section.rows.push({ key: 'clock', label: 'Precision', value: note(`this page's clock steps by ${formatMs(capture.clockStep)}, so a short call reads as nothing or a whole step: small scripts read best over many frames`) });
+    }
+    return section;
+}
+
+/**
+ * @param {string} name - The profiler name of the pass running an effect, as FramePassBloom.
+ * @returns {string} The name of the effect, as Bloom.
+ */
+function effectName(name) {
+    return name.startsWith('FramePass') && name.length > 9 ? name.slice(9) : name;
+}
+
+/**
+ * @param {PerfGpuPass[]} passes - The GPU passes of a frame.
+ * @returns {{ key: string, effect: string|null, time: number, passes: Map<string, number[]> }[]}
+ * Each effect with the passes it runs by name, and the passes of their own by name, longest first.
+ */
+function gpuGroups(passes) {
+    const groups = new Map();
+    for (const pass of passes) {
+        const key = pass.owner ? `${pass.owner}:${pass.ownerOccurrence}` : `:${pass.name}`;
+        let group = groups.get(key);
+        if (!group) groups.set(key, group = { key, effect: pass.owner, time: 0, passes: new Map() });
+        group.time += pass.time;
+        let times = group.passes.get(pass.name);
+        if (!times) group.passes.set(pass.name, times = []);
+        times.push(pass.time);
+    }
+    const total = times => times.reduce((sum, t) => sum + t, 0);
+    const sorted = [...groups.values()].sort((a, b) => b.time - a.time);
+    for (const group of sorted) group.passes = new Map([...group.passes].sort((a, b) => total(b[1]) - total(a[1])));
+    return sorted;
+}
+
+/**
  * @param {PerfCapture} capture - The capture.
  * @param {PerfSelection['gpu']} gpu - The GPU profiler.
  * @returns {string} Why a frame has no GPU timings.
@@ -603,6 +874,7 @@ function gpuNote(gpu) {
 }
 
 export {
-    CPU_PARTS, EVENT_KINDS, HITCH_FACTOR, RENDER_PHASES, buildPerfModel, captureNorms, eventLines, eventMask,
-    eventUnsupported, formatCount, formatMs, frameVerdict, isHitch, rangeStats
+    CPU_PARTS, EVENT_KINDS, HITCH_FACTOR, OTHER_SCRIPTS_COLOR, RENDER_PHASES, SCRIPT_COLORS, SCRIPT_ROWS, buildPerfModel, callCount,
+    captureNorms, effectName, eventLines, eventMask, eventUnsupported, formatCount, formatMs, frameVerdict, isHitch,
+    rangeStats, scriptColorAt, scriptLegend
 };

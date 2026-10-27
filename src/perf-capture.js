@@ -12,10 +12,38 @@
  */
 
 /**
+ * @typedef {object} PerfScript
+ * @ignore
+ * @property {number} id - Its index into {@link PerfCapture#scriptNames}.
+ * @property {string} name - The name the script type is registered under.
+ * @property {number} update - Its own time in its update, in milliseconds.
+ * @property {number} post - Its own time in its post-update.
+ * @property {number} init - Its own time initializing and post-initializing, as new instances do,
+ * and swapping in when hot-reloaded.
+ * @property {number} calls - How many of its methods were called.
+ * @property {number} updateCalls - How many times its update was called, once an instance.
+ * @property {number} postCalls - How many times its post-update was called.
+ * @property {number} initCalls - How many times it was initialized, post-initialized or swapped.
+ */
+
+/**
  * @typedef {object} PerfPass
  * @ignore
  * @property {string} name - The profiler name of the pass. Passes sharing a name are summed.
  * @property {number} time - Its GPU time in milliseconds.
+ */
+
+/**
+ * @typedef {object} PerfGpuPass
+ * @ignore
+ * @property {string} name - The profiler name of the pass.
+ * @property {number} time - Its GPU time in milliseconds.
+ * @property {string|null} owner - The profiler name of the effect running it, the pass of the
+ * frame graph it is a before or after pass of, or null for a pass of its own.
+ * @property {number} occurrence - Which of the passes of the frame graph with its name it is, 0
+ * for the first, or -1 where it was not matched to one.
+ * @property {number} ownerOccurrence - Which of the passes with its owner's name its owner is,
+ * or -1.
  */
 
 /**
@@ -27,8 +55,29 @@ const CAPTURE_FRAMES = 1000;
 // how many frames back the GPU timings of a frame are looked for: they resolve a few frames late
 const GPU_LATENCY_FRAMES = 16;
 
+// the figures kept per GPU pass of a frame: the id of its name, its time, the id of its owner's
+// name or -1, and which of the passes of the frame graph with its name, and with its owner's, it
+// matched, or -1
+const PASS_STRIDE = 5;
+
+// the share of a frame's timed passes that have to match passes of the frame graph for their
+// owners to be trusted
+const PASS_MATCH_SHARE = 0.6;
+
 // the events kept per frame, so an app measuring heavily cannot grow a frame without bound
 const MAX_FRAME_EVENTS = 64;
+
+// the figures kept per script type in a frame: its own time in its update, its post-update and its
+// initializing; how many times each was called, from SCRIPT_CALLS on; and from SCRIPT_ORDER on, the
+// place of its first update and its first post-update among the types', 1 for the first, which is
+// the order the types ran in
+const SCRIPT_STRIDE = 8;
+const SCRIPT_CALLS = 3;
+const SCRIPT_ORDER = 6;
+
+// how many calls the cost of timing a script call is measured over, the best of a few rounds
+const PROBE_CALLS = 2000;
+const PROBE_ROUNDS = 3;
 
 /**
  * The figures recorded for every frame, each in a ring of its own. Durations are in milliseconds,
@@ -61,8 +110,18 @@ const CHANNELS = [
     // resources on the device, as the frame left them
     'textures', 'targets', 'shaders', 'buffers', 'pipelines',
     // shader compiles and links the device reported, with the profiler and debug engines only
-    'compiles', 'compileTime'
+    'compiles', 'compileTime',
+    // while scripts are timed, NaN otherwise: their own time in the update of the systems and in
+    // the post-update, with when the first call of each began; all their time, wherever it ran;
+    // the part of it initializing; their calls; and the estimated cost of timing them, which
+    // counts as the inspector's. The CPU chart stacks the first two as Scripts, and the
+    // post-update without them
+    'scripts', 'scriptsUpdate', 'scriptsUpdateStart', 'scriptsPost', 'scriptsPostStart', 'scriptsTotal',
+    'scriptsInit', 'scriptCalls', 'scriptCost', 'cpuPost'
 ];
+
+// the channels of the scripts, NaN for a frame they were not timed in
+const SCRIPT_CHANNELS = ['scripts', 'scriptsUpdate', 'scriptsPost', 'scriptsTotal', 'scriptsInit', 'scriptCalls', 'scriptCost'];
 
 // the channels a detailed engine publishes, NaN in the others
 const DETAILED_CHANNELS = [
@@ -95,6 +154,56 @@ function pipelineCount(device) {
     render.forEach(addBucket);
     webgpu.computePipeline?.cache?.forEach(addBucket);
     return pipelineTotal;
+}
+
+/**
+ * @param {AppBase} app - An app.
+ * @returns {any} The prototype of its script components, through whose `_scriptMethod` the
+ * engine calls every method of a script, or null when the app has no script system or the engine
+ * calls them some other way.
+ */
+function scriptPrototype(app) {
+    const proto = /** @type {any} */ (app.systems)?.script?.ComponentType?.prototype;
+    return typeof proto?._scriptMethod === 'function' ? proto : null;
+}
+
+/**
+ * @returns {number} The smallest step the clock moves by, in milliseconds, NaN for a clock that
+ * did not move. Browsers coarsen it on pages that are not cross-origin isolated, to a tenth of a
+ * millisecond in Chromium.
+ */
+function clockStep() {
+    let step = Infinity;
+    let last = performance.now();
+    const until = last + 5;
+    for (let steps = 0, reads = 0; steps < 4 && reads < 1e6; reads++) {
+        const now = performance.now();
+        if (now > last) {
+            step = Math.min(step, now - last);
+            last = now;
+            steps++;
+        }
+        if (now > until) break;
+    }
+    return Number.isFinite(step) ? step : NaN;
+}
+
+/**
+ * @param {any} pass - A frame pass.
+ * @returns {string} The name the GPU profiler times it under.
+ */
+function profilerName(pass) {
+    const name = pass.name;
+    return name.startsWith('RenderPass') ? name.slice(10) : name;
+}
+
+/**
+ * @param {any} pass - A frame pass.
+ * @returns {any[]} The passes it runs around itself: its before and after passes, and the passes
+ * of each view of a multi-view pass.
+ */
+function nestedPasses(pass) {
+    return [...pass.beforePasses ?? [], ...pass.afterPasses ?? [], ...(Array.isArray(pass.children) ? pass.children : [])];
 }
 
 /**
@@ -171,12 +280,44 @@ class PerfCapture {
     gpuExact = false;
 
     /**
-     * What the browser and the device report: long animation frames, the spans measured by the
-     * app, the size of the JavaScript heap and the pipelines created, which only WebGPU has.
+     * What the browser, the device and the app report: long animation frames, the spans measured by
+     * the app, the size of the JavaScript heap, the pipelines created, which only WebGPU has, and
+     * the calls of scripts, which an app without a script system has none of.
      *
-     * @type {{ longFrames: boolean, measures: boolean, heap: boolean, pipelines: boolean }}
+     * @type {{ longFrames: boolean, measures: boolean, heap: boolean, pipelines: boolean, scripts: boolean }}
      */
     supports;
+
+    /**
+     * The names of the script types timed, indexed by the ids the frames keep.
+     *
+     * @type {string[]}
+     */
+    scriptNames = [];
+
+    /**
+     * The class of each script type timed, by the same ids: the one it last ran as, as a
+     * hot-reloaded script swaps in a new class under the same name.
+     *
+     * @type {Function[]}
+     */
+    scriptClasses = [];
+
+    /**
+     * The estimated cost of timing a script call in milliseconds, NaN until scripts are first
+     * timed.
+     *
+     * @type {number}
+     */
+    callCost = NaN;
+
+    /**
+     * The smallest step the clock moves by in milliseconds, which the times of single calls are
+     * made of, NaN until scripts are first timed.
+     *
+     * @type {number}
+     */
+    clockStep = NaN;
 
     /**
      * @type {AppBase}
@@ -232,18 +373,29 @@ class PerfCapture {
     _nameIds = new Map();
 
     /**
-     * The name ids and times of the GPU passes of each slot, reused as the ring turns over.
+     * The GPU passes of each slot in the order they ran, {@link PASS_STRIDE} figures each, written
+     * in place as the ring turns over, so recording makes no garbage; {@link _passCounts} says how
+     * many of them the slot has.
      *
      * @type {number[][]}
      * @private
      */
-    _passNames = [];
+    _passFigures = [];
 
     /**
-     * @type {number[][]}
+     * @type {number[]}
      * @private
      */
-    _passTimes = [];
+    _passCounts = [];
+
+    /**
+     * The owners last matched to the timed passes, by the names of the passes of the frame graph
+     * and of the timed passes they were matched for. The frame graph rarely changes, though some
+     * of its passes are made anew every frame, so most frames reuse them.
+     *
+     * @private
+     */
+    _match = { graph: /** @type {string[]} */ ([]), timed: /** @type {number[]} */ ([]), result: /** @type {number[]} */ ([]) };
 
     /**
      * The events of each slot, null for the many frames without any.
@@ -259,6 +411,74 @@ class PerfCapture {
      * @private
      */
     _gpuSlot = 0;
+
+    /**
+     * Whether to time scripts while recording.
+     *
+     * @private
+     */
+    _timeScripts = false;
+
+    /**
+     * Puts back the engine's own way of calling script methods, while scripts are timed.
+     *
+     * @type {(() => void)|null}
+     * @private
+     */
+    _unhook = null;
+
+    /**
+     * @type {Map<string, number>}
+     * @private
+     */
+    _scriptIds = new Map();
+
+    /**
+     * The figures of each script type of each slot, {@link SCRIPT_STRIDE} per type by id, reused
+     * as the ring turns over and grown as new types appear. Single precision, which times to well
+     * under a microsecond, as an app can have hundreds of types.
+     *
+     * @type {Float32Array[]}
+     * @private
+     */
+    _scriptTimes = [];
+
+    /**
+     * How many script types have had their first update, and their first post-update, in the frame
+     * being recorded.
+     *
+     * @private
+     */
+    _scriptOrder = [0, 0];
+
+    /**
+     * How deep the script call under way is nested in others, as a script creating an entity
+     * initializes its scripts within its own call; the time of the calls nested in it so far; and
+     * the phase the outermost call is in: 0 the update, 1 the post-update, 2 anywhere else.
+     *
+     * @private
+     */
+    _depth = 0;
+
+    /** @private */
+    _nested = 0;
+
+    /** @private */
+    _phase = 2;
+
+    /**
+     * The script calls of the frame being recorded in each phase, for the cost of timing them.
+     *
+     * @private
+     */
+    _phaseCalls = [0, 0, 0];
+
+    /**
+     * Whether calls are being timed to measure their cost, rather than for the frame.
+     *
+     * @private
+     */
+    _probing = false;
 
     /** @private */
     _compileStart = NaN;
@@ -287,7 +507,8 @@ class PerfCapture {
             longFrames: observable('long-animation-frame'),
             measures: observable('measure'),
             heap: Number.isFinite(heapSize()),
-            pipelines: Number.isFinite(pipelineCount(app.graphicsDevice))
+            pipelines: Number.isFinite(pipelineCount(app.graphicsDevice)),
+            scripts: !!scriptPrototype(app)
         };
     }
 
@@ -305,6 +526,24 @@ class PerfCapture {
      */
     get recording() {
         return this._recording;
+    }
+
+    /**
+     * Whether to time each script type while recording: every method of a script the engine calls
+     * is timed, which costs the app about half a microsecond a call, counted as the inspector's
+     * time. A frame recorded while it is off has no script times.
+     *
+     * @type {boolean}
+     */
+    set timeScripts(on) {
+        this._timeScripts = on;
+        if (!this._recording) return;
+        if (on) this._hookScripts();
+        else this._unhookScripts();
+    }
+
+    get timeScripts() {
+        return this._timeScripts;
     }
 
     /**
@@ -367,6 +606,7 @@ class PerfCapture {
         device.on('shader:link:end', this._onLinkEnd, this);
         this._observe('long-animation-frame', this._onLongFrames);
         this._observe('measure', this._onMeasures);
+        if (this._timeScripts) this._hookScripts();
     }
 
     /**
@@ -387,6 +627,7 @@ class PerfCapture {
         device.off('shader:link:end', this._onLinkEnd, this);
         for (const observer of this._observers) observer.disconnect();
         this._observers.length = 0;
+        this._unhookScripts();
         this.version++;
     }
 
@@ -431,23 +672,84 @@ class PerfCapture {
      * resolve.
      */
     passes(seq) {
-        const slot = seq % this._slots;
-        const names = this._passNames[slot];
-        const times = this._passTimes[slot];
-        if (!names) return [];
-        const passes = names.map((id, i) => ({ name: this.names[id], time: times[i] }));
-        return passes.sort((a, b) => b.time - a.time);
+        // passes sharing a name summed, as the profiler of an older engine reports them
+        const totals = new Map();
+        for (const pass of this.passesInOrder(seq)) totals.set(pass.name, (totals.get(pass.name) ?? 0) + pass.time);
+        return [...totals].map(([name, time]) => ({ name, time })).sort((a, b) => b.time - a.time);
     }
 
     /**
      * @param {number} seq - The sequence number of a kept frame.
-     * @returns {PerfPass[]} The GPU passes of the frame in the order they were first timed.
+     * @returns {PerfGpuPass[]} The GPU passes of the frame in the order they ran, each apart, with
+     * the effect running it where the frame graph says. An engine whose profiler sums the passes
+     * sharing a name gives one for each name.
      */
     passesInOrder(seq) {
         const slot = seq % this._slots;
-        const names = this._passNames[slot];
-        const times = this._passTimes[slot];
-        return names ? names.map((id, i) => ({ name: this.names[id], time: times[i] })) : [];
+        const figures = this._passFigures[slot];
+        const count = this._passCounts[slot] ?? 0;
+        /** @type {PerfGpuPass[]} */
+        const passes = [];
+        for (let i = 0, base = 0; i < count; i++, base += PASS_STRIDE) {
+            const owner = figures[base + 2];
+            passes.push({
+                name: this.names[figures[base]],
+                time: figures[base + 1],
+                owner: owner >= 0 ? this.names[owner] : null,
+                occurrence: figures[base + 3],
+                ownerOccurrence: figures[base + 4]
+            });
+        }
+        return passes;
+    }
+
+    /**
+     * @param {number} seq - The sequence number of a kept frame.
+     * @returns {PerfScript[]} The script types whose methods were called in the frame, with their
+     * own times, the longest first; empty for a frame scripts were not timed in.
+     */
+    scripts(seq) {
+        const slot = seq % this._slots;
+        const times = this._scriptTimes[slot];
+        /** @type {PerfScript[]} */
+        const list = [];
+        if (!times || !(this.data.scriptsTotal[slot] >= 0)) return list;
+        for (let id = 0, base = 0; base < times.length; id++, base += SCRIPT_STRIDE) {
+            const updateCalls = times[base + SCRIPT_CALLS];
+            const postCalls = times[base + SCRIPT_CALLS + 1];
+            const initCalls = times[base + SCRIPT_CALLS + 2];
+            const calls = updateCalls + postCalls + initCalls;
+            if (calls > 0) {
+                list.push({ id, name: this.scriptNames[id], update: times[base], post: times[base + 1], init: times[base + 2], calls, updateCalls, postCalls, initCalls });
+            }
+        }
+        return list.sort((a, b) => b.update + b.post + b.init - a.update - a.post - a.init);
+    }
+
+    /**
+     * @param {number} seq - The sequence number of a kept frame.
+     * @returns {Float32Array|null} The figures of each script type in the frame,
+     * {@link SCRIPT_STRIDE} a type by its index into {@link scriptNames}: its own update,
+     * post-update and initialize time, how many times each was called, and the order of its first
+     * update and post-update among the types'. A type past the end of it had none. Null for a
+     * frame scripts were not timed in. Read only.
+     */
+    scriptFigures(seq) {
+        const slot = seq % this._slots;
+        return this.data.scriptsTotal[slot] >= 0 ? this._scriptTimes[slot] ?? null : null;
+    }
+
+    /**
+     * @param {number} seq - The sequence number of a kept frame.
+     * @param {number} id - A script type, by its index into {@link scriptNames}.
+     * @returns {number} The type's own time in the frame, zero when none of its methods were
+     * called, NaN when scripts were not timed in it.
+     */
+    scriptTime(seq, id) {
+        const times = this.scriptFigures(seq);
+        if (!times) return NaN;
+        const base = id * SCRIPT_STRIDE;
+        return base < times.length ? times[base] + times[base + 1] + times[base + 2] : 0;
     }
 
     /**
@@ -512,9 +814,20 @@ class PerfCapture {
         data.compiles[slot] = 0;
         data.compileTime[slot] = 0;
         data.gpu[slot] = NaN;
-        (this._passNames[slot] ??= []).length = 0;
-        (this._passTimes[slot] ??= []).length = 0;
+        this._passFigures[slot] ??= [];
+        this._passCounts[slot] = 0;
         this._events[slot] = null;
+        const scripts = this._unhook ? 0 : NaN;
+        for (const key of SCRIPT_CHANNELS) data[key][slot] = scripts;
+        data.scriptsUpdateStart[slot] = NaN;
+        data.scriptsPostStart[slot] = NaN;
+        const figures = this._scriptTimes[slot];
+        const needed = this.scriptNames.length * SCRIPT_STRIDE;
+        if (figures && figures.length >= needed) figures.fill(0);
+        else this._scriptTimes[slot] = new Float32Array(needed);
+        this._scriptOrder[0] = 0;
+        this._scriptOrder[1] = 0;
+        this._phaseCalls.fill(0);
         this._begun = true;
         this._ended = false;
     }
@@ -562,9 +875,22 @@ class PerfCapture {
         data.renderStart[slot] = rendered ? frame.renderStart : NaN;
         data.cpu[slot] = data.update[slot] + data.render[slot];
         // the inspector's time inside the update is all counted by the time the frame's work ends
-        data.cpuApp[slot] = data.cpu[slot] - data.inspector[slot];
-        data.cpuSystems[slot] = Math.max(0, data.systems[slot] - data.physics[slot]);
         data.cpuOther[slot] = Math.max(0, data.update[slot] - data.systems[slot] - data.anim[slot] - data.post[slot] - data.inspector[slot]);
+        if (data.scriptsTotal[slot] >= 0) {
+            // the scripts' own time comes out of the update of the systems and the post-update
+            // they ran in, and so does the cost of timing them, which is the inspector's
+            const updateCost = this._phaseCalls[0] * this.callCost;
+            const postCost = this._phaseCalls[1] * this.callCost;
+            data.scriptCost[slot] = updateCost + postCost;
+            data.scripts[slot] = data.scriptsUpdate[slot] + data.scriptsPost[slot];
+            data.cpuSystems[slot] = Math.max(0, data.systems[slot] - data.physics[slot] - data.scriptsUpdate[slot] - updateCost);
+            data.cpuPost[slot] = Math.max(0, data.post[slot] - data.scriptsPost[slot] - postCost);
+            data.inspector[slot] += updateCost + postCost;
+        } else {
+            data.cpuSystems[slot] = Math.max(0, data.systems[slot] - data.physics[slot]);
+            data.cpuPost[slot] = data.post[slot];
+        }
+        data.cpuApp[slot] = data.cpu[slot] - data.inspector[slot];
         // accumulated through the frame from the worker's reports, and reset once it ends
         data.splatSort[slot] = frame.gsplatSort ?? 0;
 
@@ -631,6 +957,145 @@ class PerfCapture {
     }
 
     /**
+     * Times every method of a script the engine calls from now on, by wrapping the one method of
+     * the script components that calls them. Measures what timing a call costs the first time.
+     *
+     * @private
+     */
+    _hookScripts() {
+        if (this._unhook) return;
+        const proto = scriptPrototype(this._app);
+        if (!proto) return;
+        const original = proto._scriptMethod;
+        const app = this._app;
+        const capture = this;
+        let on = true;
+        // a call's own time leaves out the calls nested in it, which are timed apart
+        const timed = function (script, method, arg) {
+            if (!on || this.system?.app !== app) return original.call(this, script, method, arg);
+            const outer = capture._nested;
+            const outermost = capture._depth === 0;
+            if (outermost) capture._phase = method === 'update' ? 0 : method === 'postUpdate' ? 1 : 2;
+            capture._nested = 0;
+            capture._depth++;
+            const start = performance.now();
+            try {
+                return original.call(this, script, method, arg);
+            } finally {
+                const total = performance.now() - start;
+                capture._depth--;
+                capture._addScript(script, method, start, total - capture._nested, outermost);
+                capture._nested = outer + total;
+            }
+        };
+        if (Number.isNaN(this.callCost)) {
+            this.callCost = this._measureCallCost(timed, original);
+            this.clockStep = clockStep();
+        }
+        proto._scriptMethod = timed;
+        this._unhook = () => {
+            on = false;
+            // another tool that wrapped the method since keeps this wrapper, which now only passes
+            // calls on
+            if (proto._scriptMethod === timed) proto._scriptMethod = original;
+        };
+    }
+
+    /**
+     * Stops timing scripts. The frame under way was timed only in part, so it has no script times.
+     *
+     * @private
+     */
+    _unhookScripts() {
+        if (!this._unhook) return;
+        this._unhook();
+        this._unhook = null;
+        this._depth = 0;
+        this._nested = 0;
+        if (this._begun) {
+            const slot = this._end % this._slots;
+            for (const key of SCRIPT_CHANNELS) this.data[key][slot] = NaN;
+        }
+    }
+
+    /**
+     * @param {Function} timed - The wrapper timing script calls.
+     * @param {Function} original - The engine's own method it wraps.
+     * @returns {number} What timing a call costs, in milliseconds: an empty call made through the
+     * wrapper less one made directly, the best of a few rounds.
+     * @private
+     */
+    _measureCallCost(timed, original) {
+        const component = { system: { app: this._app } };
+        const script = { __scriptType: { __name: '' }, update() {} };
+        const round = (method) => {
+            const start = performance.now();
+            for (let i = 0; i < PROBE_CALLS; i++) method.call(component, script, 'update', 0);
+            return (performance.now() - start) / PROBE_CALLS;
+        };
+        this._probing = true;
+        let wrapped = Infinity;
+        let bare = Infinity;
+        for (let i = 0; i < PROBE_ROUNDS; i++) {
+            wrapped = Math.min(wrapped, round(timed));
+            bare = Math.min(bare, round(original));
+        }
+        this._probing = false;
+        return Math.max(0, wrapped - bare);
+    }
+
+    /**
+     * Adds a timed script call to the frame being recorded.
+     *
+     * @param {any} script - The script instance.
+     * @param {string} method - The method called.
+     * @param {number} start - When the call began.
+     * @param {number} self - Its own time, without the calls nested in it.
+     * @param {boolean} outermost - Whether it was not nested in another.
+     * @private
+     */
+    _addScript(script, method, start, self, outermost) {
+        if (!this._begun || this._probing) return;
+        const slot = this._end % this._slots;
+        const data = this.data;
+        // a frame begun before scripts were timed has none of their times
+        if (!(data.scriptsTotal[slot] >= 0)) return;
+        const type = script.__scriptType;
+        const name = type?.__name ?? 'script';
+        let id = this._scriptIds.get(name);
+        if (id === undefined) {
+            id = this.scriptNames.length;
+            this.scriptNames.push(name);
+            this._scriptIds.set(name, id);
+        }
+        if (this.scriptClasses[id] !== type) this.scriptClasses[id] = type;
+        let times = this._scriptTimes[slot];
+        const base = id * SCRIPT_STRIDE;
+        if (times.length < base + SCRIPT_STRIDE) {
+            // a type new to the capture: room for every type known
+            const grown = new Float32Array(this.scriptNames.length * SCRIPT_STRIDE);
+            grown.set(times);
+            this._scriptTimes[slot] = times = grown;
+        }
+        const column = method === 'update' ? 0 : method === 'postUpdate' ? 1 : 2;
+        times[base + column] += self;
+        if (column < 2 && times[base + SCRIPT_CALLS + column] === 0) times[base + SCRIPT_ORDER + column] = ++this._scriptOrder[column];
+        times[base + SCRIPT_CALLS + column]++;
+        data.scriptsTotal[slot] += self;
+        data.scriptCalls[slot]++;
+        if (column === 2) data.scriptsInit[slot] += self;
+        const phase = this._phase;
+        this._phaseCalls[phase]++;
+        if (phase === 0) {
+            data.scriptsUpdate[slot] += self;
+            if (outermost && Number.isNaN(data.scriptsUpdateStart[slot])) data.scriptsUpdateStart[slot] = start;
+        } else if (phase === 1) {
+            data.scriptsPost[slot] += self;
+            if (outermost && Number.isNaN(data.scriptsPostStart[slot])) data.scriptsPostStart[slot] = start;
+        }
+    }
+
+    /**
      * Takes GPU timings that have resolved since the last frame, and stores them with the frame
      * they describe.
      *
@@ -665,11 +1130,126 @@ class PerfCapture {
 
         const slot = seq % this._slots;
         this.data.gpu[slot] = frameTime;
-        this._passNames[slot].length = 0;
-        this._passTimes[slot].length = 0;
         this._gpuSlot = slot;
-        profiler.passTimings.forEach(this._addPass);
+        this._passCounts[slot] = 0;
+        // each pass apart where the engine keeps them so, else those sharing a name summed
+        const inOrder = profiler.passTimingsInOrder;
+        if (inOrder) {
+            for (let i = 0; i < inOrder.names.length; i++) this._addPass(inOrder.times[i], inOrder.names[i]);
+        } else {
+            profiler.passTimings.forEach(this._addPass);
+        }
+        this._matchOwners(slot);
         this.version++;
+    }
+
+    /**
+     * Finds the effect running each timed pass of a slot in the frame graph: the pass it is a
+     * before or after pass of, where that pass runs only passes of its own. A pass running effects
+     * that run passes, as a camera frame does, is a frame rather than an effect, so what it runs
+     * directly counts as passes of their own. The passes are matched by name in the order they
+     * ran, against the frame graph as it is now, as the timings arrive a few frames late; where
+     * too few match, as when the frame graph has changed, no pass gets an owner.
+     *
+     * @param {number} slot - The slot.
+     * @private
+     */
+    _matchOwners(slot) {
+        const figures = this._passFigures[slot];
+        const count = this._passCounts[slot];
+        const frameGraph = /** @type {any} */ (this._app).frameGraph;
+        // engines before 2.24 name the list renderPasses
+        const passes = frameGraph?.passes ?? frameGraph?.renderPasses ?? [];
+        const match = this._match;
+
+        // the frame graph and the timed names as the owners were last matched for
+        let same = match.graph.length === passes.length && match.timed.length === count;
+        for (let i = 0; same && i < passes.length; i++) same = match.graph[i] === passes[i].name;
+        for (let i = 0; same && i < count; i++) same = match.timed[i] === figures[i * PASS_STRIDE];
+        if (!same) {
+            match.graph = passes.map(pass => pass.name);
+            match.timed = [];
+            for (let i = 0; i < count; i++) match.timed.push(figures[i * PASS_STRIDE]);
+            match.result = this._findOwners(passes, figures, count);
+        }
+        for (let i = 0; i < count; i++) {
+            const base = i * PASS_STRIDE;
+            figures[base + 2] = match.result[i * 3];
+            figures[base + 3] = match.result[i * 3 + 1];
+            figures[base + 4] = match.result[i * 3 + 2];
+        }
+    }
+
+    /**
+     * @param {any[]} passes - The passes of the frame graph.
+     * @param {number[]} figures - The figures of the timed passes.
+     * @param {number} count - How many passes were timed.
+     * @returns {number[]} For each timed pass, the id of its owner's name, which of the passes of
+     * the frame graph with its name it is, and which with its owner's name its owner is; -1 for
+     * each where unknown.
+     * @private
+     */
+    _findOwners(passes, figures, count) {
+        // the passes in the order they ran, the passes of the views of a multi-view pass after it
+        const graph = [];
+        for (const pass of passes) {
+            graph.push(pass);
+            if (Array.isArray(pass.children)) graph.push(...pass.children);
+        }
+        const parentOf = new Map();
+        const mark = (pass) => {
+            for (const child of nestedPasses(pass)) {
+                parentOf.set(child, pass);
+                mark(child);
+            }
+        };
+        passes.forEach(mark);
+        // an effect runs passes that run none of their own
+        const isEffect = pass => nestedPasses(pass).length > 0 && nestedPasses(pass).every(child => nestedPasses(child).length === 0);
+        const names = graph.map(profilerName);
+        const occurrences = [];
+        const seen = new Map();
+        for (const name of names) {
+            occurrences.push(seen.get(name) ?? 0);
+            seen.set(name, (seen.get(name) ?? 0) + 1);
+        }
+
+        const result = [];
+        let cursor = 0;
+        let matched = 0;
+        for (let i = 0; i < count; i++) {
+            const name = this.names[figures[i * PASS_STRIDE]];
+            let j = cursor;
+            while (j < graph.length && names[j] !== name) j++;
+            if (j === graph.length) {
+                result.push(-1, -1, -1);
+                continue;
+            }
+            matched++;
+            cursor = j + 1;
+            const pass = graph[j];
+            const parent = parentOf.get(pass);
+            const owner = isEffect(pass) ? pass : parent && isEffect(parent) ? parent : null;
+            const ownerIndex = owner ? graph.indexOf(owner) : -1;
+            result.push(owner ? this._nameId(profilerName(owner)) : -1, occurrences[j], ownerIndex >= 0 ? occurrences[ownerIndex] : -1);
+        }
+        if (matched < count * PASS_MATCH_SHARE) result.fill(-1);
+        return result;
+    }
+
+    /**
+     * @param {string} name - The name of a GPU pass or an effect.
+     * @returns {number} Its index into {@link names}, added there when new.
+     * @private
+     */
+    _nameId(name) {
+        let id = this._nameIds.get(name);
+        if (id === undefined) {
+            id = this.names.length;
+            this.names.push(name);
+            this._nameIds.set(name, id);
+        }
+        return id;
     }
 
     /**
@@ -681,14 +1261,14 @@ class PerfCapture {
      * @private
      */
     _addPass = (time, name) => {
-        let id = this._nameIds.get(name);
-        if (id === undefined) {
-            id = this.names.length;
-            this.names.push(name);
-            this._nameIds.set(name, id);
-        }
-        this._passNames[this._gpuSlot].push(id);
-        this._passTimes[this._gpuSlot].push(time);
+        const slot = this._gpuSlot;
+        const figures = this._passFigures[slot];
+        const base = this._passCounts[slot]++ * PASS_STRIDE;
+        figures[base] = this._nameId(name);
+        figures[base + 1] = time;
+        figures[base + 2] = -1;
+        figures[base + 3] = -1;
+        figures[base + 4] = -1;
     };
 
     /**
@@ -828,4 +1408,4 @@ class PerfCapture {
     };
 }
 
-export { CAPTURE_FRAMES, CHANNELS, PerfCapture };
+export { CAPTURE_FRAMES, CHANNELS, PerfCapture, SCRIPT_CALLS, SCRIPT_ORDER, SCRIPT_STRIDE };

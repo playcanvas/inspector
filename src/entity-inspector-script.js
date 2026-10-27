@@ -84,6 +84,15 @@ class EntityInspector extends Script {
     stepKey = 'F10';
 
     /**
+     * Whether to start recording frames for the Performance tab as soon as the panel is created,
+     * capturing the first frames of the scene.
+     *
+     * @attribute
+     * @type {boolean}
+     */
+    record = false;
+
+    /**
      * @type {Inspector|null}
      * @private
      */
@@ -107,6 +116,7 @@ class EntityInspector extends Script {
             toggleKey: this.toggleKey,
             pauseKey: this.pauseKey,
             stepKey: this.stepKey,
+            record: this.record,
             lockedNode: this.entity
         });
 

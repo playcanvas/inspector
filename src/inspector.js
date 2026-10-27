@@ -10,7 +10,7 @@ import { ASSET_SORTS, assetRows, buildAssetModel, collectAssets } from './asset-
 import { buildCameraModel, cameraRows, collectCameras } from './camera-view.js';
 import { ContextMenu } from './context-menu.js';
 import { copyGroup, copyList, copyListRow, copySubject, stringifyCopy } from './copy-json.js';
-import { INSTANCES_PER_PAGE, LayerStepSelection, buildPassModel, buildStepModel, captureFrameGraph, passRows } from './frame-graph-view.js';
+import { INSTANCES_PER_PAGE, LayerStepSelection, buildPassModel, buildStepModel, captureFrameGraph, passRows, profilerName } from './frame-graph-view.js';
 import { bufferKind, bufferOwners, buildBufferModel, KIND_NAMES, memoryRows, videoMemory } from './memory-view.js';
 import { HierarchyView, filterSuggestions } from './hierarchy-view.js';
 import { ListView } from './list-view.js';
@@ -63,14 +63,18 @@ import { TRANSFORM_POINTER_EVENTS, TransformTool } from './transform-tool.js';
  * @property {GraphNode|null} [lockedNode] - A node whose enabled checkbox, and those of its
  * ancestors, are withheld. A script hosting the inspector passes its own entity so the panel
  * cannot switch itself off. Defaults to null.
+ * @property {boolean} [record] - Whether to start recording frames for the Performance tab right
+ * away, as if Record were pressed, so the capture begins with the first frame the app runs after
+ * the inspector is created. Defaults to false. See {@link Inspector#recording}.
  * @property {(visible: boolean) => void} [onVisibleChange] - Called with the new visibility
  * whenever the panel is shown or hidden, whether through {@link Inspector#visible}, the toggle key
  * or the panel's own close button.
  * @property {string|null} [storageKey] - The local storage key the panel's settings are kept
  * under, so they survive a reload or a restart of the app: the physics drawing switch and options,
  * the bodies excluded from it (by entity path), the active tab, the panel width, the GPU
- * timings switch, whether the CPU chart includes the inspector's time, and the charts collapsed
- * and memory lines hidden on the Performance tab. Stored settings take
+ * timings switch, and on the Performance tab the script timing switch, whether the CPU chart
+ * includes the inspector's time, the charts collapsed and lines hidden, and the script types the
+ * Scripts chart shows. Stored settings take
  * precedence over the defaults given here. Defaults to
  * 'pc-inspector'; null keeps nothing.
  */
@@ -114,9 +118,14 @@ const PROPERTY_INTERVAL = 0.1;
 // charts at the same pace
 const PERF_PROPERTY_INTERVAL = 0.25;
 
+// the least height of the part above the splitter, and of the Performance tab's charts in it,
+// which scroll below that; the styles hold the same
+const MIN_TOP_HEIGHT = 60;
+const MIN_PERF_CHARTS_HEIGHT = 60;
+
 // the names a copy of each series of the Performance tab goes by
 const PERF_SERIES_NAMES = {
-    frame: 'Frame', cpu: 'CPU', gpu: 'GPU', draws: 'Draw calls', memory: 'Memory', resources: 'Resources', events: 'Events'
+    frame: 'Frame', cpu: 'CPU', gpu: 'GPU', draws: 'Draw calls', scripts: 'Scripts', memory: 'Memory', resources: 'Resources', events: 'Events'
 };
 
 // the tooltips of the tabs
@@ -493,6 +502,14 @@ class Inspector {
     _perfInspectorToggle;
 
     /**
+     * Whether to time each script type while recording.
+     *
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _perfScriptsToggle;
+
+    /**
      * @type {HTMLElement}
      * @private
      */
@@ -521,6 +538,13 @@ class Inspector {
             supported: !!this._app.graphicsDevice.gpuProfiler,
             enabled: !!this._app.graphicsDevice.gpuProfiler?.enabled,
             enable: () => this._setGpuTimings(true)
+        },
+        scripts: {
+            enabled: this._perf.timeScripts,
+            enable: () => this._setScriptTiming(true),
+            rows: charts.scriptRows,
+            pinned: charts.pinned,
+            pin: name => charts.togglePin(name)
         }
     });
 
@@ -1143,6 +1167,7 @@ class Inspector {
         this._applyVisibility();
         this._applyPauseState();
         this._refresh();
+        if (options.record) this._setRecording(true);
         this._restoring = false;
 
         window.addEventListener('keydown', this._onKeyDown);
@@ -1243,6 +1268,27 @@ class Inspector {
 
     get paused() {
         return this._paused;
+    }
+
+    /**
+     * Whether frames are being recorded for the Performance tab, as its Record button shows. Set it
+     * to start or stop a capture from code, such as around a part of the app to profile. Starting
+     * adds to the frames kept, up to the last 1000; the tab's Clear button forgets them.
+     *
+     * @type {boolean}
+     * @example
+     * inspector.recording = true;
+     * await loadLevel();
+     * inspector.recording = false;
+     */
+    set recording(value) {
+        value = !!value;
+        if (this._destroyed || value === this._perf.recording) return;
+        this._setRecording(value);
+    }
+
+    get recording() {
+        return this._perf.recording;
     }
 
     /**
@@ -1646,12 +1692,24 @@ class Inspector {
         this._perfInspectorToggle = this._makeToggle(perfBar, 'Inspector time',
             'Include the inspector\'s own time in the CPU chart. It runs inside the app\'s update; leave it out to scale the chart\nto the app\'s own time. The frame details list it either way');
         this._perfInspectorToggle.checked = true;
+        this._perfScriptsToggle = this._makeToggle(perfBar, 'Script timing',
+            'Time each script type\'s update, post-update and initialize while recording. Timing a call costs the app about half a\nmicrosecond, counted as the inspector\'s time. Time spent in event handlers, timers and promises is not counted');
+        this._perfScriptsToggle.addEventListener('change', () => this._setScriptTiming(this._perfScriptsToggle.checked));
+        if (!this._perf.supports.scripts) {
+            this._perfScriptsToggle.disabled = true;
+            setTip(this._perfScriptsToggle.parentElement, 'This app has no script system');
+        }
         this._perfNote = el('div', 'pci-note pci-note-info');
         this._perfNote.style.display = 'none';
         perfPanel.append(perfBar, this._perfNote);
         this._perfCharts = new PerfCharts(perfPanel, this._perf);
         setTip(this._perfCharts.timelineElement, 'The frame shown, along its own time. The GPU passes are drawn back to back,\nas the GPU says how long each took but not when it ran');
         this._perfCharts.onChange = () => this._onPerfChange();
+        this._perfCharts.onSelectScript = (id) => {
+            const cls = this._perf.scriptClasses[id];
+            if (cls) this._selectAny(cls);
+        };
+        this._perfCharts.onSelectPass = pass => this._showPass(pass);
         this._perfCharts.onCollapse = () => this._saveSettings();
         this._perfInspectorToggle.addEventListener('change', () => {
             this._perfCharts.showInspector = this._perfInspectorToggle.checked;
@@ -1847,7 +1905,7 @@ class Inspector {
 
         this._makeDraggable(splitter, (e) => {
             const rect = body.getBoundingClientRect();
-            const height = Math.max(60, Math.min(rect.height - 60, e.clientY - rect.top));
+            const height = Math.max(this._topMinHeight(), Math.min(rect.height - 60, e.clientY - rect.top));
             this._hierarchyEl.style.flexBasis = `${height}px`;
         });
 
@@ -2065,6 +2123,11 @@ class Inspector {
             this._perfInspectorToggle.checked = stored.perfInspector;
             this._perfCharts.showInspector = stored.perfInspector;
         }
+        if (typeof stored.perfScripts === 'boolean') this._setScriptTiming(stored.perfScripts);
+        if (Number.isInteger(stored.perfScriptRows) && stored.perfScriptRows > 0) this._perfCharts.scriptRows = stored.perfScriptRows;
+        if (Array.isArray(stored.perfPinned)) {
+            this._perfCharts.pinned = new Set(stored.perfPinned.filter(name => typeof name === 'string'));
+        }
         if (stored.targetPreview && typeof stored.targetPreview === 'object') {
             if (typeof stored.targetPreview.enabled === 'boolean') this._previewToggle.checked = stored.targetPreview.enabled;
             if (typeof stored.targetPreview.channels === 'string') this._previewChannels.value = stored.targetPreview.channels;
@@ -2105,6 +2168,9 @@ class Inspector {
                 width: this._width,
                 gpuTimings: this._gpuToggle.checked,
                 perfInspector: this._perfInspectorToggle.checked,
+                perfScripts: this._perfScriptsToggle.checked,
+                perfScriptRows: this._perfCharts.scriptRows,
+                perfPinned: [...this._perfCharts.pinned],
                 perfCollapsed: [...this._perfCharts.collapsed],
                 perfHidden: [...this._perfCharts.hidden],
                 passPreview: this._passPreviewToggle.checked,
@@ -2717,6 +2783,32 @@ class Inspector {
     }
 
     /**
+     * @returns {number} The least height of the part above the splitter. The Performance tab keeps
+     * room for what does not shrink, its controls and its timeline, and a little of its charts,
+     * which scroll; less would spill over the splitter.
+     * @private
+     */
+    _topMinHeight() {
+        if (this._tab !== 'perf') return MIN_TOP_HEIGHT;
+        // the content as laid out, spilling or not, less what the charts take beyond their least
+        const charts = this._perfCharts.chartsElement;
+        return Math.max(MIN_TOP_HEIGHT, Math.ceil(this._hierarchyEl.scrollHeight - charts.offsetHeight + MIN_PERF_CHARTS_HEIGHT));
+    }
+
+    /**
+     * Raises the part above the splitter to the least height of the tab now shown, where it was
+     * dragged lower on another tab.
+     *
+     * @private
+     */
+    _fitTop() {
+        const basis = parseFloat(this._hierarchyEl.style.flexBasis);
+        if (!(basis > 0)) return;
+        const least = this._topMinHeight();
+        if (basis < least) this._hierarchyEl.style.flexBasis = `${least}px`;
+    }
+
+    /**
      * Turns the GPU profiler on or off, from either of the switches, which follow each other.
      *
      * @param {boolean} on - Whether to time the GPU.
@@ -2732,6 +2824,21 @@ class Inspector {
     }
 
     /**
+     * Turns the timing of scripts on or off, which takes effect right away while recording.
+     *
+     * @param {boolean} on - Whether to time each script type.
+     * @private
+     */
+    _setScriptTiming(on) {
+        on &&= this._perf.supports.scripts;
+        this._perf.timeScripts = on;
+        this._perfScriptsToggle.checked = on;
+        this._perfCharts.invalidate();
+        this._saveSettings();
+        if (this._tab === 'perf') this._refreshLists(false);
+    }
+
+    /**
      * Starts or stops recording frames for the Performance tab.
      *
      * @param {boolean} on - Whether to record.
@@ -2741,6 +2848,8 @@ class Inspector {
         if (on) this._perf.start();
         else this._perf.stop();
         this._perfCharts.invalidate();
+        // the Record button shows it on whichever tab is open, as code can start a capture too
+        this._updatePerfBar();
         this._refreshLists(false);
     }
 
@@ -2830,6 +2939,8 @@ class Inspector {
         for (const [id, panel] of Object.entries(this._panels)) {
             panel.style.display = id === tab ? '' : 'none';
         }
+        // measured with the tab's panel shown
+        if (tab === 'perf') this._fitTop();
         this._refreshLists(false);
         if (tab === 'hierarchy') {
             this._properties.setSubject(this._hierarchy.selected, buildNodeModel);
@@ -3281,6 +3392,22 @@ class Inspector {
         if (obj instanceof Mesh) return buildMeshModel(obj, ctx);
         if (bufferKind(obj)) return buildBufferModel(obj, ctx);
         return null;
+    }
+
+    /**
+     * Shows a GPU pass of the Performance tab on the Frame graph tab: the pass of the frame graph
+     * with its name it was matched to, in the frame graph as it is now, unless that is frozen.
+     *
+     * @param {{ name: string, occurrence: number }} pass - The pass, by its profiler name and which
+     * of the passes with that name it is.
+     * @private
+     */
+    _showPass({ name, occurrence }) {
+        if (!this._frozen) this._frame = captureFrameGraph(this._app);
+        this._setTab('passes');
+        const entries = this._frame?.entries.filter(entry => profilerName(entry.pass) === name) ?? [];
+        const entry = entries[occurrence] ?? entries[0];
+        if (entry) this._passList.selectItem(entry.pass);
     }
 
     /**
