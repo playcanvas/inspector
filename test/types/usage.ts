@@ -17,6 +17,7 @@ const options: InspectorOptions = {
     pauseKey: 'F9',
     stepKey: 'F10',
     lockedNode: null,
+    record: true,
     onVisibleChange: (visible: boolean) => console.log(visible),
     storageKey: null
 };
@@ -25,12 +26,14 @@ const inspector = new Inspector(app, options);
 inspector.visible = !inspector.visible;
 inspector.paused = true;
 inspector.step();
+const recording: boolean = inspector.recording;
+inspector.recording = !recording;
 inspector.onVisibleChange = null;
 inspector.destroy();
 
 const entity = new Entity('inspector');
 entity.addComponent('script');
-const script = entity.script?.create(EntityInspector, { properties: { dock: 'right' } });
+const script = entity.script?.create(EntityInspector, { properties: { dock: 'right', record: true } });
 const hosted: Inspector | null = script?.inspector ?? null;
 console.log(hosted);
 

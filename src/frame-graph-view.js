@@ -766,4 +766,4 @@ function buildStepModel(selection, ctx) {
     return sections;
 }
 
-export { INSTANCES_PER_PAGE, LayerStepSelection, buildPassModel, buildStepModel, captureFrameGraph, passRows };
+export { INSTANCES_PER_PAGE, LayerStepSelection, buildPassModel, buildStepModel, captureFrameGraph, passRows, profilerName };

@@ -92,13 +92,50 @@ the charts to pan and double-click to see the whole capture again. **‹** and *
 focus, the arrow keys step a frame (ten with <kbd>Shift</kbd>), <kbd>Home</kbd> shows the first and
 <kbd>End</kbd> follows the newest.
 
-Turn on **GPU timings** to record the GPU time. An engine whose GPU profiler does not say which
-frame its timings belong to, such as 2.23, gets them a few frames late, which the tab notes. The
+Turn on **GPU timings** to record the GPU time. On WebGPU each pass is timed, and the timeline
+draws the GPU as a flame chart: the effects, such as bloom or depth of field, on the GPU line, with
+the passes each runs under it, and the passes of their own on the GPU line too. The effect of a
+pass comes from the frame graph, the pass it is a before or after pass of; where the frame graph
+no longer matches the passes timed, every pass goes on the GPU line. Passes of one name in a row
+share a label, as Downsample ×5, the frame details list the time of each, and clicking a pass or an
+effect shows it on the Frame graph tab. An engine that sums the passes sharing a name, before
+2.24, gives one time for each name, and WebGL times the frame as a whole. An engine whose GPU
+profiler does not say which frame its timings belong to, such as 2.23, gets them a few frames late,
+which the tab notes. The
 inspector runs inside the app's update, so its own time is shown apart, as Inspector; turn off
 **Inspector time** to leave it out of the CPU chart, which then scales to the app's own time. The
 release engine times the update and the render as a whole; the profiler and debug engines add the
 phases of the render and the breakdown of the draw calls. Spans the app measures with
 `performance.measure` show on the timeline of their frame.
+
+Turn on **Script timing** to time each script type while recording: the time of its `update`,
+`postUpdate` and `initialize` calls, without the calls nested in them, such as the scripts of an
+entity a script creates, and how many times each was called. The CPU chart then stacks the scripts
+apart from the other systems, and the timeline draws the scripts of the update and of the
+post-update where they ran, with a line below breaking each down by script type: as the calls of
+the types interleave, entity by entity, each type is its time in all, back to back in the order the
+types first ran. Click a type there to show it on the Scripts tab. The Scripts chart stacks the ten script types that took the longest, over the
+frames selected together or else the whole capture, so selecting a spike brings forward the
+scripts behind it; the others share one band, whose hover lists the longest of them. **▸ 10 more**
+under the list gives ten more types a band of their own. To follow a script whatever its time, pin
+it: **Pin** beside it in the Scripts details, or Shift+click it in the list. Alt+click a line of a
+list to show it alone, and again to show them all. Timing a call costs the app about half a
+microsecond, estimated as recording starts and counted as the inspector's time. Time spent in
+event handlers, timers and promises is not counted. On a page that is not cross-origin isolated,
+the browser's clock steps by a tenth of a millisecond, so the times of small scripts read best over
+many frames selected together.
+
+To record from the first frame the app runs, pass `record: true` to the constructor, or set the
+`record` attribute of the `EntityInspector` script. Create the inspector before `app.start()` to
+include the very first frames. From code, set `inspector.recording` to start or stop a capture
+around a part of the app:
+
+```javascript
+const inspector = new Inspector(app, { record: true });
+
+// once the part to look at has run
+inspector.recording = false;
+```
 
 ### Edit transforms
 

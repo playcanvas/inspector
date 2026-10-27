@@ -1,4 +1,4 @@
-import { EventHandler, GraphNode, NullGraphicsDevice } from 'playcanvas';
+import { EventHandler, GraphNode, NullGraphicsDevice, Script } from 'playcanvas';
 
 import { expect } from 'chai';
 
@@ -7,7 +7,8 @@ import { PerfCapture } from '../src/perf-capture.js';
 import { PerfCharts } from '../src/perf-chart.js';
 import { captureJson, frameJson, rangeJson, seriesRows, toCsv } from '../src/perf-copy.js';
 import {
-    CPU_PARTS, EVENT_KINDS, buildPerfModel, captureNorms, eventLines, eventMask, eventUnsupported, frameVerdict, rangeStats
+    CPU_PARTS, EVENT_KINDS, SCRIPT_COLORS, buildPerfModel, captureNorms, eventLines, eventMask, eventUnsupported, frameVerdict,
+    rangeStats, scriptLegend
 } from '../src/perf-view.js';
 import { jsdomSetup, jsdomTeardown } from './jsdom.mjs';
 
@@ -58,6 +59,50 @@ function createApp(detailed = false) {
     };
     if (detailed) app.stats.frame.primitives = 0;
     return app;
+}
+
+/**
+ * Gives an app stub a script system, whose components call the methods of scripts through one
+ * method, as the engine's do.
+ *
+ * @param {any} app - The app stub.
+ * @returns {any} A script component of the app.
+ */
+function addScripts(app) {
+    class ScriptComponent {
+        constructor(system) {
+            this.system = system;
+        }
+
+        _scriptMethod(script, method, arg) {
+            script[method](arg);
+        }
+    }
+    const system = { app, ComponentType: ScriptComponent };
+    app.systems = { script: system };
+    return new ScriptComponent(system);
+}
+
+/**
+ * @param {string} name - The name of the script type.
+ * @param {object} costs - How long each of its methods takes, moving the clock on.
+ * @param {(script: any) => void} [inside] - Runs inside its update, as a script creating others.
+ * @returns {any} A script instance.
+ */
+function script(name, costs, inside) {
+    const spend = ms => () => {
+        clock.time += ms;
+    };
+    const instance = { __scriptType: { __name: name } };
+    for (const [method, ms] of Object.entries(costs)) instance[method] = spend(ms);
+    if (inside) {
+        const own = instance.update;
+        instance.update = () => {
+            own();
+            inside(instance);
+        };
+    }
+    return instance;
 }
 
 /**
@@ -206,10 +251,77 @@ describe('PerfCapture', function () {
         const slot = capture.slot(0);
         expect(capture.get('inspector', 0)).to.equal(1);
         const other = d[CPU_PARTS.find(part => part.key === 'other').channel][slot];
-        const sum = CPU_PARTS.reduce((total, part) => total + d[part.channel][slot], 0);
+        // the scripts are not timed apart, so they have no part of their own
+        const sum = CPU_PARTS.reduce((total, part) => total + (Number.isFinite(d[part.channel][slot]) ? d[part.channel][slot] : 0), 0);
+        expect(d.scripts[slot]).to.be.NaN;
         expect(other).to.equal(0);
         expect(sum).to.equal(capture.get('cpu', 0));
         expect(capture.get('cpuApp', 0)).to.equal(capture.get('cpu', 0) - 1);
+    });
+
+    it('times each script type while asked to, a call apart from the calls nested in it', function () {
+        const app = createApp();
+        const component = addScripts(app);
+        const original = component._scriptMethod;
+        const capture = new PerfCapture(app);
+        expect(capture.supports.scripts).to.be.true;
+        const child = script('child', { initialize: 0.2 });
+        const spawner = script('spawner', { update: 0.3 }, () => component._scriptMethod(child, 'initialize'));
+        const mover = script('mover', { postUpdate: 0.25 });
+        const frame = () => tick(app, {
+            update: 8,
+            during: () => {
+                component._scriptMethod(spawner, 'update', 0.016);
+                component._scriptMethod(mover, 'postUpdate', 0.016);
+            }
+        });
+
+        capture.start();
+        frame();
+        capture.timeScripts = true;
+        expect(component._scriptMethod).to.not.equal(original);
+        // the clock of the test stands still while the cost of a call is measured
+        capture.callCost = 0.01;
+        // the frame under way when timing began is not timed; the next one is
+        frame();
+        frame();
+        frame();
+        expect(capture.get('scriptsTotal', 0)).to.be.NaN;
+        expect(capture.scripts(0)).to.deep.equal([]);
+
+        const d = capture.data;
+        const s = capture.slot(1);
+        expect(d.scriptsUpdate[s]).to.be.closeTo(0.5, 1e-9);
+        expect(d.scriptsPost[s]).to.be.closeTo(0.25, 1e-9);
+        expect(d.scriptsTotal[s]).to.be.closeTo(0.75, 1e-9);
+        expect(d.scriptsInit[s]).to.be.closeTo(0.2, 1e-9);
+        expect(d.scriptCalls[s]).to.equal(3);
+        expect(d.scriptsUpdateStart[s]).to.equal(d.tick[s]);
+        expect(capture.scripts(1).map(t => [t.name, +(t.update + t.post + t.init).toFixed(6), t.calls])).to.deep.equal([
+            ['spawner', 0.3, 1], ['mover', 0.25, 1], ['child', 0.2, 1]
+        ]);
+        // and the class each type ran as
+        expect(capture.scriptClasses[capture.scriptNames.indexOf('mover')]).to.equal(mover.__scriptType);
+
+        // the scripts and the cost of timing them come out of the phases they ran in, the cost
+        // going to the inspector, so the parts still add up to the CPU time
+        expect(d.scriptCost[s]).to.be.closeTo(0.03, 1e-9);
+        expect(d.inspector[s]).to.be.closeTo(0.03, 1e-9);
+        expect(d.cpuSystems[s]).to.be.closeTo(4 - 0.5 - 0.02, 1e-9);
+        expect(d.cpuPost[s]).to.be.closeTo(1 - 0.25 - 0.01, 1e-9);
+        const sum = CPU_PARTS.reduce((total, part) => total + d[part.channel][s], 0);
+        expect(sum).to.be.closeTo(d.cpu[s], 1e-9);
+
+        // calls of another app's scripts pass through untimed
+        const other = addScripts(createApp());
+        Object.setPrototypeOf(other, Object.getPrototypeOf(component));
+        const calls = d.scriptCalls[capture.slot(capture.end)];
+        other._scriptMethod(mover, 'postUpdate');
+        expect(d.scriptCalls[capture.slot(capture.end)]).to.equal(calls);
+
+        // and the engine's own method is back once recording stops
+        capture.stop();
+        expect(component._scriptMethod).to.equal(original);
     });
 
     it('records the render phases of a detailed engine only', function () {
@@ -248,7 +360,8 @@ describe('PerfCapture', function () {
         expect(capture.get('gpu', 0)).to.be.NaN;
         expect(capture.get('gpu', 3)).to.be.NaN;
         expect(capture.passes(1).map(pass => pass.name)).to.deep.equal(['Forward', 'Compose']);
-        expect(capture.passesInOrder(1)[1]).to.deep.equal({ name: 'Compose', time: 2 });
+        // the app has no frame graph to say which effect runs a pass
+        expect(capture.passesInOrder(1)[1]).to.deep.equal({ name: 'Compose', time: 2, owner: null, occurrence: -1, ownerOccurrence: -1 });
     });
 
     it('gives GPU timings to the newest frame on an engine that does not say which frame', function () {
@@ -446,7 +559,7 @@ describe('Performance copies', function () {
         expect(frame.cpu.update).to.equal(4);
         expect(frame.cpu.render).to.equal(5);
         expect(frame.cpu).to.not.have.property('renderPhases');
-        expect(frame.gpu).to.deep.equal({ frame: 6, passes: { Forward: 4, Compose: 2 } });
+        expect(frame.gpu).to.deep.equal({ frame: 6, passes: { Forward: 4, Compose: 2 }, passList: [{ name: 'Forward', time: 4 }, { name: 'Compose', time: 2 }] });
         expect(frame.memory.textures).to.equal(1000);
         expect(frame.draws).to.not.have.property('forward');
         expect(frame.events[0]).to.include({ kind: 'asset', name: 'statue, "big".glb' });
@@ -563,6 +676,281 @@ describe('Performance timeline', function () {
     });
 });
 
+describe('Performance GPU passes', function () {
+    beforeEach(() => clock.install());
+    afterEach(() => clock.uninstall());
+
+    /**
+     * @param {string} name - Its name.
+     * @param {any[]} [before] - Its before passes.
+     * @returns {any} A frame pass stub.
+     */
+    const pass = (name, before = []) => ({ name, beforePasses: before, afterPasses: [] });
+
+    /**
+     * @param {boolean} [matching] - Whether the frame graph matches the passes timed.
+     * @returns {PerfCapture} A capture of a frame whose GPU passes are a forward pass, a bloom
+     * effect of three downsample passes and two upsample passes, and a compose pass, all timed
+     * apart, with a frame graph of a camera frame running them.
+     */
+    function recordPasses(matching = true) {
+        const app = createApp();
+        const names = ['Forward', 'Downsample', 'Downsample', 'Downsample', 'Upsample', 'Upsample', 'Compose'];
+        const times = [2, 0.5, 0.3, 0.2, 0.2, 0.1, 0.4];
+        const profiler = { enabled: true, frameTime: undefined, renderVersion: -1, passTimings: new Map(), passTimingsInOrder: { names: [], times: [] } };
+        app.graphicsDevice.gpuProfiler = profiler;
+        const blurs = names.slice(1, 6).map(name => pass(`RenderPass${name}`));
+        const bloom = pass('FramePassBloom', blurs);
+        const forward = pass('RenderPassForward');
+        const compose = pass('RenderPassCompose');
+        const frame = pass('FramePassCameraFrame', [forward, bloom, compose]);
+        app.frameGraph = { passes: matching ? [forward, ...blurs, bloom, compose, frame] : [pass('RenderPassOther')] };
+        const capture = new PerfCapture(app);
+        capture.start();
+        tick(app);
+        tick(app);
+        profiler.frameTime = 4;
+        profiler.renderVersion = 1;
+        profiler.passTimingsInOrder = { names, times };
+        tick(app);
+        return capture;
+    }
+
+    it('keeps each pass apart, with the effect running it', function () {
+        const capture = recordPasses();
+        expect(capture.passesInOrder(0).map(p => [p.name, p.owner, p.occurrence])).to.deep.equal([
+            ['Forward', null, 0],
+            ['Downsample', 'FramePassBloom', 0], ['Downsample', 'FramePassBloom', 1], ['Downsample', 'FramePassBloom', 2],
+            ['Upsample', 'FramePassBloom', 0], ['Upsample', 'FramePassBloom', 1],
+            ['Compose', null, 0]
+        ]);
+        // summed by name where asked to
+        expect(capture.passes(0)[0]).to.deep.equal({ name: 'Forward', time: 2 });
+        expect(capture.passes(0).find(p => p.name === 'Downsample').time).to.be.closeTo(1, 1e-9);
+
+        // the details group the passes of each effect by name, with the time of each
+        const gpu = buildPerfModel({ capture, seq: 0, range: null, gpu: { supported: true, enabled: true, enable: () => {} } }).find(s => s.key === 'gpu');
+        const rows = gpu.rows.filter(row => row.depth).map(row => [row.label, row.depth]);
+        expect(rows).to.deep.equal([['Forward', 1], ['Bloom', 1], ['Downsample ×3', 2], ['Upsample ×2', 2], ['Compose', 1]]);
+        expect(gpu.rows.find(row => row.label === 'Downsample ×3').value.text).to.match(/0\.50, 0\.30, 0\.20$/);
+    });
+
+    it('draws the effects on the GPU line and their passes below', function () {
+        const capture = recordPasses();
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        charts.pick(0);
+        const bars = charts._timelineModel().bars;
+        const gpu = bars.filter(bar => bar.lane === 'gpu');
+        expect(gpu.map(bar => bar.name)).to.deep.equal(['Forward', 'Bloom', 'Compose']);
+        const bloom = gpu[1];
+        expect(bloom.duration).to.be.closeTo(1.3, 1e-9);
+        expect(bloom.pass).to.deep.equal({ name: 'FramePassBloom', occurrence: 0 });
+        const below = bars.filter(bar => bar.lane === 'gpuPasses');
+        expect(below.map(bar => bar.label)).to.deep.equal(['Downsample 1/3', 'Downsample 2/3', 'Downsample 3/3', 'Upsample 1/2', 'Upsample 2/2']);
+        // under the effect, and a run of one name labelled once
+        expect(below[0].start).to.equal(bloom.start);
+        expect(below.map(bar => bar.run)).to.deep.equal([3, 0, 0, 2, 0]);
+        expect(below[2].pass).to.deep.equal({ name: 'Downsample', occurrence: 2 });
+        charts.destroy();
+    });
+
+    it('draws every pass on one line where the frame graph does not match', function () {
+        const capture = recordPasses(false);
+        expect(capture.passesInOrder(0).every(p => p.owner === null && p.occurrence === -1)).to.be.true;
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        charts.pick(0);
+        const bars = charts._timelineModel().bars;
+        expect(bars.filter(bar => bar.lane === 'gpuPasses')).to.have.length(0);
+        expect(bars.filter(bar => bar.lane === 'gpu')).to.have.length(7);
+        expect(bars.find(bar => bar.lane === 'gpu' && bar.name === 'Downsample').run).to.equal(3);
+        charts.destroy();
+    });
+});
+
+describe('Performance scripts', function () {
+    beforeEach(() => clock.install());
+    afterEach(() => clock.uninstall());
+
+    const gpu = { supported: true, enabled: false, enable: () => {} };
+
+    /**
+     * @param {boolean} [timed] - Whether to time the scripts.
+     * @returns {PerfCapture} A capture of three frames, each running an ai script's update and
+     * post-update and a mover script's update.
+     */
+    function recordScripts(timed = true) {
+        const app = createApp();
+        const component = addScripts(app);
+        const capture = new PerfCapture(app);
+        capture.timeScripts = timed;
+        capture.start();
+        capture.callCost = 0;
+        const ai = script('ai', { update: 0.4, postUpdate: 0.1 });
+        const mover = script('mover', { update: 0.2 });
+        for (let i = 0; i < 3; i++) {
+            tick(app, {
+                update: 8,
+                during: () => {
+                    component._scriptMethod(ai, 'update');
+                    component._scriptMethod(mover, 'update');
+                    component._scriptMethod(ai, 'postUpdate');
+                }
+            });
+        }
+        tick(app);
+        return capture;
+    }
+
+    it('lists each script type of a frame, and of the frames selected together', function () {
+        const capture = recordScripts();
+        const scripts = { enabled: true, enable: () => {} };
+        const sections = buildPerfModel({ capture, seq: 1, range: null, gpu, scripts });
+        const cpu = sections.find(section => section.key === 'cpu');
+        expect(cpu.rows.find(row => row.key === 'scripts').value.text).to.match(/^0\.70 ms/);
+        const section = sections.find(section => section.key === 'scripts');
+        expect(section.rows.find(row => row.key === 'total').value.text).to.match(/^0\.70 ms/);
+        const types = section.rows.filter(row => row.key.startsWith('type:'));
+        expect(types.map(row => row.label)).to.deep.equal(['ai', 'mover']);
+        expect(types[0].value.text).to.equal('0.50 ms · update 0.40 ms in 1 call · post-update 0.10 ms in 1 call');
+        expect(types[0].value.swatch).to.equal(SCRIPT_COLORS[0]);
+
+        const range = buildPerfModel({ capture, seq: 1, range: { from: 0, to: 2 }, gpu, scripts }).find(s => s.key === 'scripts');
+        expect(range.title).to.equal('Scripts, frames 1–3');
+        expect(range.rows.find(row => row.label === 'mover').value.text).to.equal('avg 0.20 ms · p95 0.20 ms · max 0.20 ms · 1 call a frame');
+    });
+
+    it('offers to turn script timing on for frames it did not time', function () {
+        const capture = recordScripts(false);
+        let enabled = false;
+        const section = buildPerfModel({ capture, seq: 1, range: null, gpu, scripts: { enabled: false, enable: () => (enabled = true) } }).find(s => s.key === 'scripts');
+        expect(section.rows).to.have.length(1);
+        section.rows[0].value.actions[0].run();
+        expect(enabled).to.be.true;
+    });
+
+    it('copies the times of the scripts', function () {
+        const capture = recordScripts();
+        const frame = /** @type {any} */ (frameJson(capture, 1));
+        // kept at single precision
+        expect(frame.scripts.types.ai.update).to.be.closeTo(0.4, 1e-6);
+        expect(frame.scripts.types.ai.calls).to.equal(2);
+        expect(frame.scripts.types.ai.postUpdateCalls).to.equal(1);
+        expect(frame.cpu.scripts).to.be.closeTo(0.7, 1e-9);
+        const rows = /** @type {any[]} */ (seriesRows(capture, 'scripts', 0, 2));
+        expect(rows).to.have.length(3);
+        expect(rows[0].mover).to.be.closeTo(0.2, 1e-6);
+        expect(toCsv(rows).split('\n')[0]).to.equal('frame,total,ai,mover');
+    });
+
+    it('draws the scripts on the timeline and in a chart of their own', function () {
+        const capture = recordScripts();
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        charts.pick(1);
+        const bars = charts._timelineModel().bars.filter(bar => bar.lane === 'detail');
+        const update = bars.find(bar => bar.name === 'Scripts');
+        expect(update.duration).to.be.closeTo(0.6, 1e-9);
+        expect(update.children.map(child => child.name)).to.deep.equal(['ai', 'mover']);
+        expect(bars.find(bar => bar.name === 'Post-update scripts').children.map(child => child.name)).to.deep.equal(['ai']);
+        // the line below breaks them down by type, back to back in the order the types first ran
+        const model = charts._timelineModel();
+        const types = model.bars.filter(bar => bar.lane === 'types');
+        expect(types.map(bar => [bar.name, bar.calls])).to.deep.equal([['ai', 1], ['mover', 1], ['ai', 1]]);
+        expect(types[1].start).to.be.closeTo(types[0].start + types[0].duration, 1e-9);
+        expect(types[0].start).to.equal(update.start);
+        expect(charts._scriptList().lines.map(line => [line.name, line.color])).to.deep.equal([['ai', SCRIPT_COLORS[0]], ['mover', SCRIPT_COLORS[1]]]);
+        charts.destroy();
+    });
+
+    /**
+     * @returns {PerfCapture} A capture of three frames running fifteen script types, the later
+     * ones longer, and in the second frame a spike of the shortest.
+     */
+    function recordMany() {
+        const app = createApp();
+        const component = addScripts(app);
+        const capture = new PerfCapture(app);
+        capture.timeScripts = true;
+        capture.start();
+        capture.callCost = 0;
+        const types = Array.from({ length: 15 }, (_, i) => script(`script${i}`, { update: (i + 1) / 100 }));
+        const spike = script('script0', { update: 1 });
+        for (let f = 0; f < 3; f++) {
+            tick(app, {
+                update: 8,
+                during: () => {
+                    for (const type of types) component._scriptMethod(type, 'update');
+                    if (f === 1) component._scriptMethod(spike, 'update');
+                }
+            });
+        }
+        tick(app);
+        return capture;
+    }
+
+    it('bands the pinned script types, then the longest, ranked over the frames selected', function () {
+        const capture = recordMany();
+        const names = legend => legend.types.map(type => type.name);
+        // over the whole capture the spike makes the shortest type the longest
+        const all = scriptLegend(capture, 0, 2, 10, new Set());
+        expect(names(all)[0]).to.equal('script0');
+        expect(all.others).to.equal(5);
+        // over a frame without the spike it is the shortest, among the others
+        const quiet = scriptLegend(capture, 2, 2, 10, new Set());
+        expect(names(quiet)).to.deep.equal(['script14', 'script13', 'script12', 'script11', 'script10', 'script9', 'script8', 'script7', 'script6', 'script5']);
+        // a type pinned comes first, whatever its time
+        const pinned = scriptLegend(capture, 2, 2, 10, new Set(['script1']));
+        expect(pinned.types[0]).to.include({ name: 'script1', pinned: true, color: SCRIPT_COLORS[0] });
+        expect(pinned.others).to.equal(4);
+        // more rows go round the colors again, lighter
+        const more = scriptLegend(capture, 2, 2, 20, new Set());
+        expect(more.types).to.have.length(15);
+        expect(more.types[10].color).to.match(/^rgb\(/);
+        expect(more.others).to.equal(0);
+    });
+
+    it('pins a script type, shows one alone, and lists what the other scripts hold', function () {
+        const capture = recordMany();
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        let saved = 0;
+        charts.onCollapse = () => saved++;
+        charts.pick(2);
+        let list = charts._scriptList();
+        expect(list.controls).to.deep.equal(['more']);
+        expect(list.lines.at(-1).name).to.equal('Other scripts');
+
+        charts.togglePin('script1');
+        expect(saved).to.equal(1);
+        list = charts._scriptList();
+        expect(list.lines[0]).to.include({ name: 'script1', pinned: true });
+        // the details offer to unpin it
+        const scripts = { enabled: true, enable: () => {}, rows: charts.scriptRows, pinned: charts.pinned, pin: name => charts.togglePin(name) };
+        const section = buildPerfModel({ capture, seq: 2, range: null, gpu, scripts }).find(s => s.key === 'scripts');
+        const row = section.rows.find(r => r.label === 'script1');
+        expect(row.value.actions[0].text).to.equal('Unpin');
+        row.value.actions[0].run();
+        expect(charts.pinned.has('script1')).to.be.false;
+
+        // Alt+click shows one line alone, and again shows them all
+        charts.scriptRows = 20;
+        list = charts._scriptList();
+        expect(list.controls).to.deep.equal(['fewer']);
+        charts._lineCharts.scripts = { lines: list.lines };
+        charts._solo('scripts', 3);
+        expect(list.lines.filter(line => !charts.hidden.has(`scripts:${line.key}`)).map(line => line.name)).to.deep.equal([list.lines[3].name]);
+        charts._solo('scripts', 3);
+        expect(charts.hidden.size).to.equal(0);
+
+        // the other scripts of a frame, longest first: over the whole capture the spike gives the
+        // shortest type a band, leaving five
+        charts.scriptRows = 10;
+        const legend = charts._scriptLegend();
+        expect(charts._otherScriptLines(2, legend).map(line => line.text)).to.deep.equal([
+            'script5 0.06 ms · 1 call', 'script4 0.05 ms · 1 call', 'script3 0.04 ms · 1 call', 'script2 0.03 ms · 1 call', 'script1 0.02 ms · 1 call'
+        ]);
+        charts.destroy();
+    });
+});
+
 describe('Inspector Performance tab', function () {
     let app;
 
@@ -609,8 +997,66 @@ describe('Inspector Performance tab', function () {
         expect(charts.showInspector).to.be.true;
         toggle.click();
         expect(charts.showInspector).to.be.false;
+        // an app without a script system has no scripts to time
+        const scripts = [...root.querySelectorAll('.pci-check')].find(label => label.textContent === 'Script timing').querySelector('input');
+        expect(scripts.disabled).to.be.true;
         inspector.destroy();
         expect(app.hasEvent('frameupdate')).to.be.false;
+    });
+
+    it('records from the start when asked to, and from code', function () {
+        const inspector = new Inspector(app, { storageKey: null, record: true });
+        const root = panel(inspector);
+        expect(inspector.recording).to.be.true;
+        expect(app.hasEvent('frameupdate')).to.be.true;
+        // the Record button shows it, though another tab is open
+        const record = root.querySelector('.pci-record');
+        expect(record.classList.contains('pci-active')).to.be.true;
+        inspector.recording = false;
+        expect(app.hasEvent('frameupdate')).to.be.false;
+        expect(record.getAttribute('aria-label')).to.equal('Record');
+        inspector.recording = true;
+        expect(app.hasEvent('frameupdate')).to.be.true;
+        inspector.destroy();
+        expect(inspector.recording).to.be.false;
+        inspector.recording = true;
+        expect(app.hasEvent('frameupdate')).to.be.false;
+    });
+
+    it('shows a GPU pass clicked on the timeline on the Frame graph tab', function () {
+        const inspector = /** @type {any} */ (new Inspector(app, { storageKey: null }));
+        inspector._setTab('perf');
+        inspector._perfCharts.onSelectPass({ name: 'Downsample', occurrence: 1 });
+        expect(inspector._tab).to.equal('passes');
+        inspector.destroy();
+    });
+
+    it('shows a script type clicked on the timeline on the Scripts tab', function () {
+        class Mover extends Script {
+            static scriptName = 'mover';
+        }
+        const inspector = /** @type {any} */ (new Inspector(app, { storageKey: null }));
+        inspector._perf.scriptNames.push('mover');
+        inspector._perf.scriptClasses.push(Mover);
+        inspector._setTab('perf');
+        inspector._perfCharts.onSelectScript(0);
+        expect(inspector._tab).to.equal('scripts');
+        inspector.destroy();
+    });
+
+    it('times scripts while Script timing is on, and stops when the panel goes', function () {
+        const component = addScripts(app);
+        const original = component._scriptMethod;
+        const inspector = new Inspector(app, { storageKey: null });
+        const root = panel(inspector);
+        [...root.querySelectorAll('.pci-tab')].find(tab => tab.textContent === 'Performance').click();
+        const toggle = [...root.querySelectorAll('.pci-check')].find(label => label.textContent === 'Script timing').querySelector('input');
+        expect(toggle.disabled).to.be.false;
+        toggle.click();
+        root.querySelector('.pci-record').click();
+        expect(component._scriptMethod).to.not.equal(original);
+        inspector.destroy();
+        expect(component._scriptMethod).to.equal(original);
     });
 
     it('notes that GPU timings land late on an engine that does not say which frame they describe', function () {
@@ -674,6 +1120,20 @@ describe('Inspector Performance tab', function () {
         } finally {
             clock.uninstall();
         }
+    });
+
+    it('remembers the script types pinned and how many the Scripts chart lists', function () {
+        const first = new Inspector(app, { storageKey: 'pci-perf-pins-test' });
+        const charts = /** @type {any} */ (first)._perfCharts;
+        charts.togglePin('mover');
+        charts.scriptRows = 20;
+        charts.onCollapse();
+        first.destroy();
+        const second = new Inspector(app, { storageKey: 'pci-perf-pins-test' });
+        const restored = /** @type {any} */ (second)._perfCharts;
+        expect([...restored.pinned]).to.deep.equal(['mover']);
+        expect(restored.scriptRows).to.equal(20);
+        second.destroy();
     });
 
     it('remembers the sections collapsed and the lines hidden', function () {

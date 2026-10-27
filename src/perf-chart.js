@@ -1,11 +1,12 @@
 import { formatBytes } from './model.js';
+import { SCRIPT_CALLS, SCRIPT_ORDER, SCRIPT_STRIDE } from './perf-capture.js';
 import {
-    CPU_PARTS, EVENT_KINDS, HITCH_FACTOR, RENDER_PHASES, captureNorms, eventLines, eventMask, eventUnsupported, formatCount,
-    formatMs
+    CPU_PARTS, EVENT_KINDS, HITCH_FACTOR, OTHER_SCRIPTS_COLOR, RENDER_PHASES, SCRIPT_ROWS, callCount, captureNorms, effectName,
+    eventLines, eventMask, eventUnsupported, formatCount, formatMs, scriptLegend
 } from './perf-view.js';
 
 /** @import { PerfCapture } from './perf-capture.js' */
-/** @import { PerfPart } from './perf-view.js' */
+/** @import { PerfPart, PerfScriptLegend } from './perf-view.js' */
 
 /**
  * @typedef {object} PerfChartDef
@@ -45,6 +46,21 @@ import {
  * @property {number} min - The value at its bottom.
  * @property {number} max - The value at its top.
  * @property {PerfLevels|null} levels - How a height in it reads as a value, null while it has none.
+ * @property {Float64Array[]} [values] - The ring each line was drawn from, where it is not a
+ * channel of the capture.
+ * @property {boolean} [stacked] - Whether its lines are stacked, as the times of the scripts are.
+ * @property {PerfScriptLegend} [legend] - The script types it gives a band of their own.
+ */
+
+/**
+ * @typedef {object} PerfScriptLine
+ * @ignore
+ * @property {string} key - The key it is hidden under.
+ * @property {string} name - The display name.
+ * @property {string} color - The color it is drawn in.
+ * @property {number} id - The script type, by its index into the names of the capture, or -1 for
+ * the other types together.
+ * @property {boolean} pinned - Whether it has its band because it is pinned.
  */
 
 /**
@@ -76,8 +92,10 @@ import {
  * @property {number} [chart] - The index of the chart it holds, into {@link CHARTS}.
  * @property {PerfLevels} [levels] - How a height in it reads as a value, for a chart.
  * @property {string} [lines] - The section of the line chart it is a line of the list of:
- * 'memory' or 'resources'.
- * @property {number} [index] - Which line of that list it is.
+ * 'scripts', 'memory' or 'resources'.
+ * @property {number} [index] - Which line of that list it is, -1 for a row that is not one.
+ * @property {'more'|'fewer'} [control] - The row of the Scripts list it is that shows more script
+ * types, or fewer.
  * @property {number} [kind] - The index of the kind of event it marks, into {@link EVENT_KINDS}.
  * @property {string} [section] - The section it is the title of: 'memory', 'resources', 'events'
  * or the key of a collapsed chart.
@@ -91,6 +109,8 @@ import {
  * @property {boolean} [indent] - Whether it is a part of the line above.
  * @property {boolean} [wrap] - Whether it is prose, wrapped to the width of the box.
  * @property {boolean} [strong] - Whether it is what the pointer is over, among the lines.
+ * @property {boolean} [nested] - Whether it is a part of the indented line above, as a script type
+ * among the other scripts.
  */
 
 /**
@@ -105,6 +125,35 @@ import {
  * @property {boolean} positioned - Whether its start is known, rather than placed after the bar
  * before, as a GPU pass is.
  * @property {boolean} [instant] - Whether it has no duration, as an asset finishing loading.
+ * @property {number} [calls] - How many calls it took, as a script type does; the mean per frame
+ * for an average frame.
+ * @property {string} [label] - What its hover box calls it, where its name alone is not enough.
+ * @property {number} [script] - The script type it is, by its index into the names of the capture.
+ * @property {PerfPassLink} [pass] - The pass of the frame graph it is, which a click shows on the
+ * Frame graph tab.
+ * @property {number} [run] - How many passes of its name follow on in a row from it, it among
+ * them, which share one label; 0 for one inside such a run.
+ * @property {number} [runDuration] - Their time together.
+ * @property {PerfScriptType[]} [children] - What it is made of, which its hover box lists, as the
+ * script types of the scripts.
+ */
+
+/**
+ * @typedef {object} PerfPassLink
+ * @ignore
+ * @property {string} name - The profiler name of the pass.
+ * @property {number} occurrence - Which of the passes of the frame graph with that name it is.
+ */
+
+/**
+ * @typedef {object} PerfScriptType
+ * @ignore
+ * @property {number} id - The script type, by its index into the names of the capture.
+ * @property {string} name - Its name.
+ * @property {number} duration - Its own time in an update or a post-update, in milliseconds.
+ * @property {number} [calls] - How many calls that took.
+ * @property {number} [order] - Where its first call came among the types', 1 for the first.
+ * @property {string} color - The color it is drawn in.
  */
 
 /**
@@ -117,6 +166,12 @@ import {
  * @property {string} color - The color it is drawn in.
  * @property {number} duration - How long it took in milliseconds, zero for an instant.
  * @property {number} start - When it began, in milliseconds into the frame, NaN where unknown.
+ * @property {number} [calls] - How many calls it took.
+ * @property {string} [label] - What its hover box calls it.
+ * @property {number} [script] - The script type it is, which a click shows on the Scripts tab.
+ * @property {PerfPassLink} [pass] - The pass of the frame graph it is, which a click shows on the
+ * Frame graph tab.
+ * @property {PerfScriptType[]} [children] - What it is made of.
  */
 
 /**
@@ -239,6 +294,10 @@ const REDRAW_INTERVAL = 250;
 // the most bars of a row of the frame timeline its hover box lists
 const TIMELINE_HOVER_BARS = 12;
 
+// the most script types and GPU passes a hover box lists: the script types of the timeline and
+// those among the other scripts of the Scripts chart, and the GPU passes and effects of the timeline
+const HOVER_SCRIPT_TYPES = 20;
+
 // the most frames of a column the details of its events list
 const HOVER_FRAMES = 3;
 
@@ -257,10 +316,17 @@ const NO_DASH = [];
 const NO_PARTS = /** @type {PerfPart[]} */ ([]);
 
 const SECTION_TITLE = 14;
+const SCRIPT_ROW = 13;
+// the fewest rows the Scripts chart is tall, for an app of few script types
+const SCRIPT_CHART_ROWS = 3;
 const MEMORY_ROW = 13;
 const RESOURCE_ROW = 13;
 const EVENT_ROW = 10;
 const TIMELINE_HEIGHT = 88;
+// how much taller the timeline is with its line of script types, and with its line of the passes
+// of the GPU effects
+const SCRIPT_TYPES_LINE = 13;
+const GPU_PASSES_LINE = 11;
 const FONT = '10px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const BOLD = `600 ${FONT}`;
 
@@ -430,6 +496,37 @@ class PerfCharts {
     onCollapse = () => {};
 
     /**
+     * How many of the longest script types the Scripts chart gives a band of their own, besides
+     * those pinned: a multiple of {@link SCRIPT_ROWS}, more with each Show more.
+     *
+     * @type {number}
+     */
+    scriptRows = SCRIPT_ROWS;
+
+    /**
+     * The names of the script types pinned, which the Scripts chart gives a band of their own
+     * whatever their time.
+     *
+     * @type {Set<string>}
+     */
+    pinned = new Set();
+
+    /**
+     * Called with a script type clicked on the timeline, by its index into the names of the
+     * capture, to show it on the Scripts tab.
+     *
+     * @type {(id: number) => void}
+     */
+    onSelectScript = () => {};
+
+    /**
+     * Called with a GPU pass or effect clicked on the timeline, to show it on the Frame graph tab.
+     *
+     * @type {(pass: PerfPassLink) => void}
+     */
+    onSelectPass = () => {};
+
+    /**
      * Whether the CPU chart includes the inspector's own time. It runs inside the app's update and
      * can dwarf a light app, so leaving it out scales the chart to the app's own time.
      *
@@ -506,12 +603,20 @@ class PerfCharts {
     _shapes = new Map();
 
     /**
-     * The line charts as last drawn, by section, null while collapsed.
+     * The script types the Scripts chart last drew, telling when a new selection changes them.
      *
-     * @type {{ memory: PerfLineChart|null, resources: PerfLineChart|null }}
      * @private
      */
-    _lineCharts = { memory: null, resources: null };
+    _legendSignature = '';
+
+    /**
+     * The line charts, and the stacked chart of the scripts, as last drawn, by section, null while
+     * collapsed or empty.
+     *
+     * @type {{ scripts: PerfLineChart|null, memory: PerfLineChart|null, resources: PerfLineChart|null }}
+     * @private
+     */
+    _lineCharts = { scripts: null, memory: null, resources: null };
 
     /**
      * The first and one past the last frame of each column when last drawn.
@@ -598,6 +703,13 @@ class PerfCharts {
     _timeLayout = { from: 0, span: 1, length: 1, plot: 1 };
 
     /**
+     * The height of the timeline, taller while it has a line of script types.
+     *
+     * @private
+     */
+    _timelineHeight = TIMELINE_HEIGHT;
+
+    /**
      * The size of the charts and of the timeline, as the resize observer last reported them. A
      * draw goes by these rather than asking the page, which would lay out the whole panel there
      * and then after the property view changed it, inside the app's frame.
@@ -671,6 +783,7 @@ class PerfCharts {
         canvas.addEventListener('dblclick', this._onDoubleClick);
         canvas.addEventListener('contextmenu', this._onContextMenu);
         this._timeline.addEventListener('pointermove', this._onTimelineMove);
+        this._timeline.addEventListener('click', this._onTimelineClick);
         this._timeline.addEventListener('pointerleave', this._onTimelineLeave);
         this._timeline.addEventListener('wheel', this._onTimelineWheel, { passive: false });
         this._timeline.addEventListener('dblclick', this._onTimelineDoubleClick);
@@ -718,6 +831,15 @@ class PerfCharts {
         drawn.timeline = false;
         drawn.overlay = false;
     };
+
+    /**
+     * The element holding the charts, which scrolls when they do not fit it.
+     *
+     * @type {HTMLElement}
+     */
+    get chartsElement() {
+        return this._chartsEl;
+    }
 
     /**
      * The element holding the frame timeline, for a tooltip.
@@ -802,6 +924,21 @@ class PerfCharts {
         this.range = null;
         this._drawn.overlay = true;
         this._drawn.timeline = true;
+        this._checkScriptLegend();
+        this.onChange();
+    }
+
+    /**
+     * Pins a script type to the Scripts chart, giving it a band of its own whatever its time, or
+     * unpins it.
+     *
+     * @param {string} name - The name of the script type.
+     */
+    togglePin(name) {
+        if (this.pinned.has(name)) this.pinned.delete(name);
+        else this.pinned.add(name);
+        this.invalidate();
+        this.onCollapse();
         this.onChange();
     }
 
@@ -1019,6 +1156,9 @@ class PerfCharts {
 
     /** @private */
     _drawCharts() {
+        const scripts = this._scriptList();
+        const scriptsOpen = !this.collapsed.has('scripts');
+        const scriptsHeight = SECTION_TITLE + (scriptsOpen ? Math.max(SCRIPT_CHART_ROWS, scripts.lines.length + scripts.controls.length) * SCRIPT_ROW : 0);
         const resources = this._resourceList();
         const resourcesOpen = !this.collapsed.has('resources');
         const eventsOpen = !this.collapsed.has('events');
@@ -1031,7 +1171,7 @@ class PerfCharts {
         for (let i = 0; i < CHARTS.length; i++) {
             if (!this.collapsed.has(CHARTS[i].key)) openCharts++;
         }
-        const sections = memoryHeight + resourcesHeight + eventsHeight + (CHARTS.length - openCharts) * SECTION_TITLE + CHART_GAP * (CHARTS.length + 2);
+        const sections = scriptsHeight + memoryHeight + resourcesHeight + eventsHeight + (CHARTS.length - openCharts) * SECTION_TITLE + CHART_GAP * (CHARTS.length + 3);
 
         // taller than the box when the charts would get too short in it: the box scrolls then
         const contentHeight = Math.max(this._sizeOf(this._chartsEl).height, sections + openCharts * MIN_CHART_HEIGHT);
@@ -1161,10 +1301,7 @@ class PerfCharts {
             }
 
             if (peakCount === 0 && chart.empty && capture.count) {
-                ctx.fillStyle = '#7f8f93';
-                ctx.textAlign = 'center';
-                ctx.fillText(chart.empty, GUTTER + plot / 2, top + chartHeight / 2 - 5);
-                ctx.textAlign = 'left';
+                PerfCharts._message(ctx, chart.empty, '#7f8f93', plot, top + chartHeight / 2 - 5);
             }
 
             // the name and the figure of the frame shown beside the chart, its scale in its corner
@@ -1179,10 +1316,16 @@ class PerfCharts {
             PerfCharts._label(ctx, chart.format(scale), width - 3, top + 2, 'right');
         }
 
+        // the time of each script type, stacked beside the list of them
+        const scriptsTop = chartsBottom;
+        this._sectionTitle(ctx, 'scripts', 'Scripts', scriptsTop, scriptsOpen);
+        this._lineCharts.scripts = scriptsOpen ?
+            this._drawScriptChart(ctx, scripts, scriptsTop + SECTION_TITLE, width, plot, lo, hi, wide, visibleFrom, visibleTo, bars, barX, barW) : null;
+
         // memory and the resources: a chart each, of lines sharing a scale from the smallest to
         // the largest value of the lines shown, beside a list of them that hides or shows each, so
         // hiding the large ones lets the small ones fill the chart
-        const memoryTop = chartsBottom;
+        const memoryTop = scriptsTop + scriptsHeight + CHART_GAP;
         this._sectionTitle(ctx, 'memory', 'Memory', memoryTop, memoryOpen);
         this._lineCharts.memory = memoryOpen ?
             this._drawLineChart(ctx, 'memory', this._memoryList(), formatBytes, max => Math.max(MEMORY_MIN_SHARE * max, MEMORY_MIN_BYTES),
@@ -1227,11 +1370,12 @@ class PerfCharts {
         layout.bottom = eventsTop + eventsHeight;
         this._updateScrollbar();
 
+        // nothing recorded yet: said in the first chart open, or beside the first title, where
+        // nothing else is drawn while the capture is empty
         if (capture.count === 0) {
-            ctx.fillStyle = '#93a2a6';
-            ctx.textAlign = 'center';
-            ctx.fillText(capture.recording ? 'Recording…' : 'Press Record to capture frames', GUTTER + plot / 2, height / 2 - 6);
-            ctx.textAlign = 'left';
+            const first = this._rows.find(row => row.chart !== undefined);
+            const y = first ? first.top + first.height / 2 - 5 : 2;
+            PerfCharts._message(ctx, capture.recording ? 'Recording…' : 'Press Record to capture frames', '#93a2a6', plot, y);
         }
     }
 
@@ -1430,6 +1574,175 @@ class PerfCharts {
         for (let i = 0; i < bars; i++) {
             if ((masks[i] & bit) && barW[i] > 0) ctx.fillRect(barX[i], top, barW[i], height);
         }
+    }
+
+    /**
+     * @returns {PerfScriptLegend} The script types the Scripts chart gives a band of their own,
+     * ranked over the frames selected together, or the whole capture.
+     * @private
+     */
+    _scriptLegend() {
+        const capture = this._capture;
+        const range = this.range;
+        const from = range ? Math.max(capture.first, range.from) : capture.first;
+        const to = range ? Math.min(capture.end - 1, range.to) : capture.end - 1;
+        return scriptLegend(capture, from, to, this.scriptRows, this.pinned);
+    }
+
+    /**
+     * The Scripts chart ranks its types over the frames selected together, so a new selection can
+     * change its bands: redraws it when it does.
+     *
+     * @private
+     */
+    _checkScriptLegend() {
+        if (!this.collapsed.has('scripts') && this._scriptLegend().signature !== this._legendSignature) this._drawn.charts = true;
+    }
+
+    /**
+     * @returns {{ legend: PerfScriptLegend, lines: PerfScriptLine[], controls: ('more'|'fewer')[] }}
+     * What the Scripts chart stacks: the script types with a band of their own and the others
+     * together; and the rows of its list that show more types or fewer.
+     * @private
+     */
+    _scriptList() {
+        const legend = this._scriptLegend();
+        /** @type {PerfScriptLine[]} */
+        const lines = legend.types.map(type => ({ key: type.name, name: type.name, color: type.color, id: type.id, pinned: type.pinned }));
+        if (legend.others) lines.push({ key: '#other', name: 'Other scripts', color: OTHER_SCRIPTS_COLOR, id: -1, pinned: false });
+        /** @type {('more'|'fewer')[]} */
+        const controls = [];
+        if (legend.others) controls.push('more');
+        if (this.scriptRows > SCRIPT_ROWS) controls.push('fewer');
+        return { legend, lines, controls };
+    }
+
+    /**
+     * @returns {string} Why the Scripts chart has nothing to draw.
+     * @private
+     */
+    _scriptsEmpty() {
+        const capture = this._capture;
+        if (!capture.supports.scripts) return 'This app has no script system';
+        if (!capture.timeScripts) return 'Turn Script timing on to time each script type while recording';
+        return capture.count ? 'No script was timed in the frames kept' : 'Each script type is timed while recording';
+    }
+
+    /**
+     * Draws the time of each script type stacked, beside the list of them, each with a box ticked
+     * while it shows, so hiding the large ones lets the small ones fill the chart.
+     *
+     * @param {CanvasRenderingContext2D} ctx - The context.
+     * @param {{ legend: PerfScriptLegend, lines: PerfScriptLine[], controls: ('more'|'fewer')[] }} list - What
+     * it stacks, and the rows of its list that show more types or fewer.
+     * @param {number} top - The top of the chart.
+     * @param {number} width - The width of the canvas.
+     * @param {number} plot - The width of the plot.
+     * @param {Int32Array} lo - The first frame of each column.
+     * @param {Int32Array} hi - One past the last frame of each column.
+     * @param {boolean} wide - Whether each bar is a frame of its own.
+     * @param {number} visibleFrom - The first frame in view.
+     * @param {number} visibleTo - One past the last frame in view.
+     * @param {number} bars - How many bars there are.
+     * @param {Int32Array} barX - The left edge of each bar.
+     * @param {Int32Array} barW - The width of each bar.
+     * @returns {PerfLineChart|null} What it drew, for the pointer, or null for nothing.
+     * @private
+     */
+    _drawScriptChart(ctx, { legend, lines: list, controls }, top, width, plot, lo, hi, wide, visibleFrom, visibleTo, bars, barX, barW) {
+        const capture = this._capture;
+        const d = capture.data;
+        const slots = capture.slots;
+        const rows = Math.max(SCRIPT_CHART_ROWS, list.length + controls.length);
+        const height = rows * SCRIPT_ROW;
+        this._legendSignature = legend.signature;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
+        ctx.fillRect(GUTTER, top, plot, height);
+        if (!list.length) {
+            PerfCharts._message(ctx, this._scriptsEmpty(), '#7f8f93', plot, top + height / 2 - 5);
+            return null;
+        }
+
+        // the time of each type in each frame in view, in a ring of its own, the others' being what
+        // the listed ones leave of all the scripts' time, and the sum of those shown
+        const hidden = list.map(line => this.hidden.has(`scripts:${line.key}`));
+        const rings = list.map((line, i) => this._floats(`scripts:${i}`, slots));
+        const sums = this._floats('scripts:sum', slots);
+        for (let seq = visibleFrom; seq < visibleTo; seq++) {
+            const slot = seq % slots;
+            const times = capture.scriptFigures(seq);
+            let listed = 0;
+            let shown = 0;
+            for (let i = 0; i < list.length; i++) {
+                const id = list[i].id;
+                let v = NaN;
+                if (times && id >= 0) {
+                    const base = id * SCRIPT_STRIDE;
+                    v = base < times.length ? times[base] + times[base + 1] + times[base + 2] : 0;
+                    listed += v;
+                } else if (times) {
+                    v = Math.max(0, d.scriptsTotal[slot] - listed);
+                }
+                rings[i][slot] = v;
+                if (!hidden[i] && v > 0) shown += v;
+            }
+            sums[slot] = times ? shown : NaN;
+        }
+
+        // the list: a box each, ticked while the type shows, a pin before the types pinned, then the
+        // rows showing more types or fewer, and the others last; the rows below it still read the
+        // chart
+        const parts = [];
+        const partData = [];
+        const other = list.length && list[list.length - 1].id === -1 ? list.length - 1 : -1;
+        /** @type {{ index: number, control?: 'more'|'fewer' }[]} */
+        const order = [];
+        for (let i = 0; i < list.length; i++) {
+            if (i !== other) order.push({ index: i });
+        }
+        for (const control of controls) order.push({ index: -1, control });
+        if (other >= 0) order.push({ index: other });
+        for (let r = 0; r < rows; r++) {
+            const y = top + r * SCRIPT_ROW;
+            const entry = order[r];
+            if (entry?.control) {
+                this._rows.push({ top: y, height: SCRIPT_ROW, lines: 'scripts', index: -1, control: entry.control });
+                ctx.fillStyle = '#93a2a6';
+                ctx.fillText(entry.control === 'more' ? `▸ ${Math.min(SCRIPT_ROWS, legend.others)} more` : '▴ Fewer', 10, y + 1);
+                continue;
+            }
+            const i = entry ? entry.index : -1;
+            this._rows.push({ top: y, height: SCRIPT_ROW, lines: 'scripts', index: i });
+            if (i < 0) continue;
+            const line = list[i];
+            PerfCharts._checkbox(ctx, 10.5, y + 2.5, line.color, !hidden[i]);
+            ctx.fillStyle = hidden[i] ? '#56656a' : '#b9c4c7';
+            ctx.fillText(PerfCharts._fit(ctx, `${line.pinned ? '📌' : ''}${line.name}`, '', GUTTER - 26), 23, y + 1);
+        }
+        // stacked from the first of the list up, so the longest is the steady base and the others
+        // ride on top
+        for (let i = 0; i < list.length; i++) {
+            if (hidden[i]) continue;
+            const line = list[i];
+            parts.push({ key: line.key, name: line.name, color: line.color, channel: '' });
+            partData.push(rings[i]);
+        }
+
+        // scaled to the largest frame of the columns, short of the spikes, as the CPU chart is
+        const pick = this._ints('scripts:pick', lo.length).fill(-1);
+        const peaks = this._floats('peaks', lo.length);
+        const peakCount = PerfCharts._pickLargest(sums, slots, lo, hi, pick, peaks);
+        const sorted = peaks.subarray(0, peakCount).sort();
+        const max = peakCount ? sorted[peakCount - 1] : 0;
+        const typical = peakCount ? sorted[Math.floor(0.95 * (peakCount - 1))] : 0;
+        const scale = niceCeil(Math.min(max, SPIKE_HEADROOM * typical));
+        /** @type {PerfShape} */
+        const shape = { total: 'scriptsTotal', parts, lines: NO_PARTS, partData, lineData: [], reduced: false };
+        PerfCharts._drawStack(ctx, shape, sums, slots, wide ? null : pick, visibleFrom, bars, barX, barW, top, height, scale, Infinity,
+            this._ints('stackBase', bars), this._floats('stackSum', bars));
+        PerfCharts._label(ctx, formatMs(scale), width - 3, top + 1, 'right');
+        const levels = { top, bottom: top + height, min: 0, max: scale, format: formatMs };
+        return { lines: list, format: formatMs, pick, min: 0, max: scale, levels, values: rings, stacked: true, legend };
     }
 
     /**
@@ -1665,6 +1978,24 @@ class PerfCharts {
     }
 
     /**
+     * Draws a line of text centered across the plot, cut short with an ellipsis where the plot is
+     * too narrow for it.
+     *
+     * @param {CanvasRenderingContext2D} ctx - The context.
+     * @param {string} text - The text.
+     * @param {string} color - Its color.
+     * @param {number} plot - The width of the plot.
+     * @param {number} y - Its top.
+     * @private
+     */
+    static _message(ctx, text, color, plot, y) {
+        ctx.fillStyle = color;
+        ctx.textAlign = 'center';
+        ctx.fillText(PerfCharts._fit(ctx, text, '', plot - 8), GUTTER + plot / 2, y);
+        ctx.textAlign = 'left';
+    }
+
+    /**
      * As much of a label as fits: the name and its time, the name alone, or the start of the name
      * cut short with an ellipsis.
      *
@@ -1771,6 +2102,38 @@ class PerfCharts {
         // not say when each ran
         phase('detail', 'physicsStart', 'physics', color('physics'), 'Physics');
         phase('detail', 'animStart', 'anim', color('anim'), 'Animation');
+        // the scripts while they were timed: their own time in the update and the post-update,
+        // each from the start of its first call, the mean over the frames that timed them
+        if (Number.isFinite(start('scriptsUpdateStart')) || Number.isFinite(start('scriptsPostStart'))) {
+            const timedMean = (key) => {
+                let sum = 0;
+                let n = 0;
+                for (let seq = from; seq <= to; seq++) {
+                    const v = d[key][capture.slot(seq)];
+                    if (Number.isFinite(v)) {
+                        sum += v;
+                        n++;
+                    }
+                }
+                return n ? sum / n : NaN;
+            };
+            const scriptsColor = color('scripts');
+            const updateTypes = this._scriptTypes(from, to, 0);
+            const postTypes = this._scriptTypes(from, to, 1);
+            bars.push({ lane: 'detail', start: start('scriptsUpdateStart'), duration: timedMean('scriptsUpdate'), color: scriptsColor, name: 'Scripts', positioned: true, children: updateTypes });
+            bars.push({ lane: 'detail', start: start('scriptsPostStart'), duration: timedMean('scriptsPost'), color: scriptsColor, name: 'Post-update scripts', positioned: true, children: postTypes });
+            // the line below them breaks each down by script type. The calls of the types
+            // interleave, entity by entity, so each is its time in all, back to back from the start
+            // of the scripts in the order the types first ran; what is left at the end is the
+            // initializing of scripts created along the way
+            for (const [types, startKey, method] of [[updateTypes, 'scriptsUpdateStart', ''], [postTypes, 'scriptsPostStart', ', post-update']]) {
+                let at = start(startKey);
+                for (const type of [...types].sort((a, b) => a.order - b.order)) {
+                    bars.push({ lane: 'types', start: at, duration: type.duration, color: type.color, name: type.name, positioned: false, calls: type.calls, label: `${type.name}${method}`, script: type.id });
+                    at += type.duration;
+                }
+            }
+        }
         if (capture.detailed) {
             let at = start('renderStart');
             for (const [key, name, phaseColor] of RENDER_TIMELINE) {
@@ -1780,22 +2143,7 @@ class PerfCharts {
             }
         }
 
-        // the GPU does not say when each pass ran, only for how long: back to back, each its mean
-        // over the frames that timed the GPU, in the order the passes first appear
-        const passes = new Map();
-        let timed = 0;
-        for (let seq = from; seq <= to; seq++) {
-            const list = capture.passesInOrder(seq);
-            if (list.length) timed++;
-            for (const pass of list) passes.set(pass.name, (passes.get(pass.name) ?? 0) + pass.time);
-        }
-        let t = 0;
-        let i = 0;
-        for (const [name, total] of passes) {
-            const time = total / timed;
-            bars.push({ lane: 'gpu', start: t, duration: time, color: PASS_COLORS[i++ % PASS_COLORS.length], name, positioned: false });
-            t += time;
-        }
+        this._gpuBars(from, to, bars);
 
         // the events of a single frame; an average frame has none of its own
         if (!range) {
@@ -1812,6 +2160,144 @@ class PerfCharts {
     }
 
     /**
+     * Adds the GPU passes of the frames to the bars of the timeline. The GPU does not say when each
+     * pass ran, only for how long, so they are back to back, each apart, its mean over the frames
+     * that timed the GPU, in the order the passes first ran. The passes an effect runs go on a line
+     * of their own under a bar of the effect, as in a flame chart; a pass of its own, or every pass
+     * where the frame graph did not match, goes on the GPU line.
+     *
+     * @param {number} from - The first frame.
+     * @param {number} to - The last frame, inclusive.
+     * @param {PerfTimeBar[]} bars - Receives the bars.
+     * @private
+     */
+    _gpuBars(from, to, bars) {
+        const capture = this._capture;
+        // each pass by its name and which of the passes with that name it is in its frame
+        /** @type {Map<string, { name: string, time: number, owner: string|null, occurrence: number, ownerOccurrence: number }[]>} */
+        const byName = new Map();
+        const order = [];
+        let timed = 0;
+        for (let seq = from; seq <= to; seq++) {
+            const list = capture.passesInOrder(seq);
+            if (!list.length) continue;
+            timed++;
+            const seen = new Map();
+            for (const pass of list) {
+                const k = seen.get(pass.name) ?? 0;
+                seen.set(pass.name, k + 1);
+                let same = byName.get(pass.name);
+                if (!same) byName.set(pass.name, same = []);
+                let entry = same[k];
+                if (!entry) {
+                    entry = { name: pass.name, time: 0, owner: null, occurrence: -1, ownerOccurrence: -1 };
+                    same[k] = entry;
+                    order.push(entry);
+                }
+                entry.time += pass.time;
+                // as the newest frame has it
+                entry.owner = pass.owner;
+                entry.occurrence = pass.occurrence;
+                entry.ownerOccurrence = pass.ownerOccurrence;
+            }
+        }
+        if (!timed) return;
+
+        // a color for each name, of pass or effect, in the order they come
+        const colors = new Map();
+        const colorOf = (name) => {
+            let color = colors.get(name);
+            if (!color) colors.set(name, color = PASS_COLORS[colors.size % PASS_COLORS.length]);
+            return color;
+        };
+        const link = (name, occurrence) => (occurrence >= 0 ? { name, occurrence } : undefined);
+        const label = entry => (byName.get(entry.name).length > 1 ? `${entry.name} ${byName.get(entry.name).indexOf(entry) + 1}/${byName.get(entry.name).length}` : entry.name);
+        let t = 0;
+        for (let i = 0; i < order.length;) {
+            const entry = order[i];
+            if (!entry.owner) {
+                const time = entry.time / timed;
+                bars.push({ lane: 'gpu', start: t, duration: time, color: colorOf(entry.name), name: entry.name, label: label(entry), positioned: false, pass: link(entry.name, entry.occurrence) });
+                t += time;
+                i++;
+                continue;
+            }
+            // the passes the effect runs in a row, under a bar of it
+            const { owner, ownerOccurrence } = entry;
+            const start = t;
+            const children = [];
+            for (; i < order.length && order[i].owner === owner && order[i].ownerOccurrence === ownerOccurrence; i++) {
+                const pass = order[i];
+                const time = pass.time / timed;
+                const color = colorOf(pass.name);
+                bars.push({ lane: 'gpuPasses', start: t, duration: time, color, name: pass.name, label: label(pass), positioned: false, pass: link(pass.name, pass.occurrence) });
+                children.push({ name: label(pass), duration: time, color });
+                t += time;
+            }
+            bars.push({ lane: 'gpu', start, duration: t - start, color: colorOf(owner), name: effectName(owner), positioned: false, pass: link(owner, ownerOccurrence), children });
+        }
+
+        // passes of one name in a row share a label: the first of them says how many there are
+        for (let i = 0; i < bars.length; i++) {
+            const bar = bars[i];
+            if (bar.lane !== 'gpu' && bar.lane !== 'gpuPasses') continue;
+            if (bar.run === 0) continue;
+            let n = 1;
+            let duration = bar.duration;
+            for (let j = i + 1; j < bars.length && bars[j].lane === bar.lane && bars[j].name === bar.name && !bars[j].children && !bar.children; j++) {
+                bars[j].run = 0;
+                duration += bars[j].duration;
+                n++;
+            }
+            if (n > 1) {
+                bar.run = n;
+                bar.runDuration = duration;
+            }
+        }
+    }
+
+    /**
+     * @param {number} from - The first frame.
+     * @param {number} to - The last frame, inclusive.
+     * @param {number} column - Which method of the script types: 0 their update, 1 their
+     * post-update.
+     * @returns {PerfScriptType[]} Each script type with that method, with its time and its calls,
+     * the mean over the frames that timed scripts, and where its first call came, the mean over
+     * the frames it ran in.
+     * @private
+     */
+    _scriptTypes(from, to, column) {
+        const capture = this._capture;
+        const names = capture.scriptNames;
+        // summed by type in arrays, as an app can have hundreds of them over many frames
+        const times = new Float64Array(names.length);
+        const calls = new Float64Array(names.length);
+        const orders = new Float64Array(names.length);
+        const ran = new Float64Array(names.length);
+        let timed = 0;
+        for (let seq = from; seq <= to; seq++) {
+            const figures = capture.scriptFigures(seq);
+            if (!figures) continue;
+            timed++;
+            for (let base = 0, id = 0; base < figures.length; base += SCRIPT_STRIDE, id++) {
+                const n = figures[base + SCRIPT_CALLS + column];
+                if (!n) continue;
+                times[id] += figures[base + column];
+                calls[id] += n;
+                orders[id] += figures[base + SCRIPT_ORDER + column];
+                ran[id]++;
+            }
+        }
+        const colors = this._scriptLegend().colors;
+        /** @type {PerfScriptType[]} */
+        const types = [];
+        for (let id = 0; id < names.length; id++) {
+            if (ran[id]) types.push({ id, name: names[id], duration: times[id] / timed, calls: calls[id] / timed, order: orders[id] / ran[id], color: colors.get(id) ?? OTHER_SCRIPTS_COLOR });
+        }
+        return types;
+    }
+
+    /**
      * What the timeline shows, to copy: its title, how many frames it covers, the frame interval
      * and its bars by row. A GPU pass has no start, as the GPU does not say when it ran.
      *
@@ -1820,12 +2306,14 @@ class PerfCharts {
     timelineJson() {
         const model = this._timelineModel();
         if (!model) return null;
-        const rows = { cpu: 'CPU', detail: 'Update and render', gpu: 'GPU passes', events: 'Events' };
+        const rows = { cpu: 'CPU', detail: 'Update and render', types: 'Script types', gpu: 'GPU', gpuPasses: 'Passes of the effects', events: 'Events' };
         const bars = model.bars.filter(bar => bar.duration > 0 || bar.instant).map(bar => ({
             row: rows[bar.lane],
             name: bar.name,
             start: bar.positioned && Number.isFinite(bar.start) ? bar.start : null,
-            duration: bar.instant ? 0 : bar.duration
+            duration: bar.instant ? 0 : bar.duration,
+            ...(bar.calls !== undefined ? { calls: bar.calls } : {}),
+            ...(bar.children ? { parts: bar.children.map(child => ({ name: child.name, duration: child.duration, ...(child.calls !== undefined ? { calls: child.calls } : {}) })) } : {})
         }));
         return { title: model.title, frames: model.frames, interval: model.interval, bars };
     }
@@ -1887,11 +2375,20 @@ class PerfCharts {
      * @private
      */
     _drawTimeline() {
-        const prepared = this._prepare(this._timeline, this._timelineEl);
+        const model = this._timelineModel();
+        // a line more for the script types, while the frames shown timed them
+        const typed = !!model?.bars.some(bar => bar.lane === 'types');
+        // and for the passes of the GPU effects, where the frame graph says which effect runs them
+        const owned = !!model?.bars.some(bar => bar.lane === 'gpuPasses');
+        const timelineHeight = TIMELINE_HEIGHT + (typed ? SCRIPT_TYPES_LINE : 0) + (owned ? GPU_PASSES_LINE : 0);
+        if (timelineHeight !== this._timelineHeight) {
+            this._timelineHeight = timelineHeight;
+            this._timelineEl.style.height = `${timelineHeight}px`;
+        }
+        const prepared = this._prepare(this._timeline, this._timelineEl, timelineHeight);
         this._bars = [];
         if (!prepared) return;
         const { ctx, width, height } = prepared;
-        const model = this._timelineModel();
         if (!model) {
             this._timeScrollbar.set(0, 1);
             return;
@@ -1923,13 +2420,23 @@ class PerfCharts {
         const toX = t => GUTTER + ((t - from) / span) * plot;
 
         // the CPU, and below it, unnamed as in a flame chart, what its update and its render are
-        // made of
+        // made of, and the script types; then the GPU, and below it the passes of its effects
         const lanes = [
             { key: 'cpu', name: 'CPU', title: 'CPU', y: 16, h: 12 },
-            { key: 'detail', name: '', title: 'Update and render', y: 29, h: 10 },
-            { key: 'gpu', name: 'GPU passes', title: 'GPU passes', y: 43, h: 10 },
-            { key: 'events', name: 'Events', title: 'Events', y: 57, h: 8 }
+            { key: 'detail', name: '', title: 'Update and render', y: 29, h: 10 }
         ];
+        let y = 39;
+        if (typed) {
+            lanes.push({ key: 'types', name: '', title: 'Script types', y: y + 3, h: 10 });
+            y += SCRIPT_TYPES_LINE;
+        }
+        lanes.push({ key: 'gpu', name: 'GPU', title: 'GPU passes', y: y + 4, h: 10 });
+        y += 14;
+        if (owned) {
+            lanes.push({ key: 'gpuPasses', name: '', title: 'Passes of the effects', y: y + 1, h: 10 });
+            y += GPU_PASSES_LINE;
+        }
+        lanes.push({ key: 'events', name: 'Events', title: 'Events', y: y + 4, h: 8 });
         const lane = Object.fromEntries(lanes.map(l => [l.key, l]));
         this._lanes = lanes;
         for (const { name, y, h } of lanes) {
@@ -1945,6 +2452,8 @@ class PerfCharts {
         ctx.beginPath();
         ctx.rect(GUTTER, 0, plot, height);
         ctx.clip();
+        // the labels once every bar is drawn, as the label of a run spans the bars after its first
+        const labels = [];
         for (const bar of frameBars) {
             if (!(bar.duration > 0 || bar.instant) || !Number.isFinite(bar.start)) continue;
             const row = lane[bar.lane];
@@ -1952,15 +2461,21 @@ class PerfCharts {
             const x1 = Math.max(x0 + 1, toX(bar.start + Math.max(0, bar.duration)));
             if (x1 < GUTTER || x0 > width) continue;
             ctx.fillStyle = bar.color;
-            ctx.fillRect(x0, row.y, x1 - x0, row.h);
-            const left = Math.max(GUTTER, x0);
-            const text = PerfCharts._fit(ctx, bar.name, bar.instant ? '' : formatMs(bar.duration), Math.min(width, x1) - left - 6);
-            if (text) {
-                ctx.fillStyle = '#0b0f10';
-                ctx.fillText(text, left + 3, row.y + (row.h - 10) / 2);
+            // the passes of a run are told apart by a gap, where there is room for one
+            const inRun = bar.run !== undefined;
+            ctx.fillRect(x0, row.y, x1 - x0 - (inRun && x1 - x0 >= 3 ? 1 : 0), row.h);
+            if (bar.run !== 0) {
+                // a run is labelled once, across it, with how many passes it has
+                const runEnd = bar.run > 1 ? Math.max(x1, toX(bar.start + bar.runDuration)) : x1;
+                const left = Math.max(GUTTER, x0);
+                const name = bar.run > 1 ? `${bar.name} ×${bar.run}` : bar.name;
+                const text = PerfCharts._fit(ctx, name, bar.instant ? '' : formatMs(bar.run > 1 ? bar.runDuration : bar.duration), Math.min(width, runEnd) - left - 6);
+                if (text) labels.push(text, left + 3, row.y + (row.h - 10) / 2);
             }
-            this._bars.push({ x0, x1, lane: bar.lane, name: bar.name, color: bar.color, duration: bar.instant ? 0 : bar.duration, start: bar.positioned ? bar.start : NaN });
+            this._bars.push({ x0, x1, lane: bar.lane, name: bar.name, color: bar.color, duration: bar.instant ? 0 : bar.duration, start: bar.positioned ? bar.start : NaN, calls: bar.calls, label: bar.label, script: bar.script, pass: bar.pass, children: bar.children });
         }
+        ctx.fillStyle = '#0b0f10';
+        for (let i = 0; i < labels.length; i += 3) ctx.fillText(labels[i], labels[i + 1], labels[i + 2]);
 
         // the end of the frame, and the display interval
         const lineTop = lane.cpu.y - 2;
@@ -2092,7 +2607,7 @@ class PerfCharts {
         if (row.section) return [{ text: this.collapsed.has(row.section) ? 'Click to expand' : 'Click to collapse' }];
         const chart = row.chart !== undefined ? CHARTS[row.chart] : null;
         const kind = row.kind !== undefined ? EVENT_KINDS[row.kind] : null;
-        if (row.lines) return this._lineChartLines(row.lines, row.index, x, column);
+        if (row.lines) return this._lineChartLines(row.lines, row.index, x, column, row.control);
         if (x < 0) {
             const tip = chart?.tip ?? kind?.tip;
             const lines = tip ? [{ text: tip, wrap: true }] : [];
@@ -2148,6 +2663,24 @@ class PerfCharts {
     }
 
     /**
+     * Shows one line of a line chart alone, hiding the others, or shows them all again when it
+     * already is.
+     *
+     * @param {string} section - The section of the chart.
+     * @param {number} index - The line.
+     * @private
+     */
+    _solo(section, index) {
+        const keys = this._lineCharts[section].lines.filter(line => !line.unsupported).map(line => `${section}:${line.key}`);
+        const key = this._lineToggle(section, index);
+        const alone = !this.hidden.has(key) && keys.every(other => other === key || this.hidden.has(other));
+        for (const other of keys) {
+            if (alone || other === key) this.hidden.delete(other);
+            else this.hidden.add(other);
+        }
+    }
+
+    /**
      * @param {string} section - The section of a line chart.
      * @param {number} index - One of its lines.
      * @returns {string|null} The key the line is hidden under, or null for one that cannot show.
@@ -2163,23 +2696,60 @@ class PerfCharts {
      * @param {number} index - The line the pointer is beside.
      * @param {number} x - Where the pointer is across the plot, negative over the list.
      * @param {number} column - The column under it.
+     * @param {'more'|'fewer'} [control] - The row of the Scripts list showing more types or fewer
+     * the pointer is beside.
      * @returns {PerfHoverLine[]} Over the list, what clicking does; over the chart, every line of
-     * the frame there, largest first, with its change since the frame before.
+     * the frame there, largest first, with its change since the frame before, and for the other
+     * scripts the types among them.
      * @private
      */
-    _lineChartLines(section, index, x, column) {
+    _lineChartLines(section, index, x, column, control) {
         const capture = this._capture;
         const drawn = this._lineCharts[section];
         if (!drawn) return [];
         const line = drawn.lines[index];
         if (x < 0) {
+            if (control === 'more') {
+                const others = drawn.legend?.others ?? 0;
+                return [{ text: `Give the next ${Math.min(SCRIPT_ROWS, others)} of the ${formatCount(others)} other script types a band of their own`, wrap: true }];
+            }
+            if (control === 'fewer') return [{ text: `Show only the ${SCRIPT_ROWS} longest script types, and those pinned`, wrap: true }];
+            if (!line) return [];
             if (line.unsupported) return [{ text: line.unsupported, wrap: true }];
-            return [{ text: `Click to ${this.hidden.has(`${section}:${line.key}`) ? 'show' : 'hide'} ${line.name.toLowerCase()} in the chart` }];
+            // the name of a script is its own, as written
+            const name = drawn.stacked && line.key !== '#other' ? line.name : line.name.toLowerCase();
+            const hint = [`Click to ${this.hidden.has(`${section}:${line.key}`) ? 'show' : 'hide'} ${name} in the chart, Alt+click to show it alone`];
+            if (drawn.stacked && line.id >= 0) hint.push(line.pinned ? 'Pinned, so it keeps a band of its own. Shift+click to unpin it' : 'Shift+click to pin it, so it keeps a band of its own');
+            return hint.map(text => ({ text, wrap: true }));
         }
         const seq = drawn.pick[column] ?? -1;
         if (!capture.has(seq)) return [];
         const d = capture.data;
         const s = capture.slot(seq);
+        if (drawn.stacked) {
+            /** @type {PerfHoverLine[]} */
+            const lines = [{ text: `Frame ${seq + 1}` }];
+            if (!(d.scriptsTotal[s] >= 0)) return [...lines, { text: 'Scripts were not timed in this frame', indent: true }];
+            lines.push({ text: `Scripts ${formatMs(d.scriptsTotal[s])} · ${callCount(d.scriptCalls[s])}` });
+            // the calls of each type, the other scripts' being what the listed ones leave
+            const figures = capture.scriptFigures(seq);
+            let listed = 0;
+            const callsOf = (l) => {
+                if (l.id < 0) return d.scriptCalls[s] - listed;
+                const base = l.id * SCRIPT_STRIDE;
+                const n = figures && base < figures.length ? figures[base + SCRIPT_CALLS] + figures[base + SCRIPT_CALLS + 1] + figures[base + SCRIPT_CALLS + 2] : 0;
+                listed += n;
+                return n;
+            };
+            const entries = drawn.lines.map((l, i) => ({ l, v: drawn.values[i][s], n: callsOf(l) })).filter(({ v }) => v > 0);
+            entries.sort((a, b) => b.v - a.v);
+            for (const { l, v, n } of entries) {
+                const hidden = this.hidden.has(`${section}:${l.key}`) ? ', hidden' : '';
+                lines.push({ text: `${l.name} ${formatMs(v)} · ${callCount(n)}${hidden}`, color: l.color, indent: true });
+                if (l.id === -1 && drawn.legend) lines.push(...this._otherScriptLines(seq, drawn.legend));
+            }
+            return lines;
+        }
         const p = capture.has(seq - 1) ? capture.slot(seq - 1) : -1;
         const entries = drawn.lines.map(l => ({ l, v: d[l.key][s] })).filter(({ v }) => Number.isFinite(v));
         entries.sort((a, b) => b.v - a.v);
@@ -2191,6 +2761,30 @@ class PerfCharts {
             const hidden = this.hidden.has(`${section}:${l.key}`) ? ', hidden' : '';
             lines.push({ text: `${l.name} ${drawn.format(v)}${change}${hidden}`, color: l.color, indent: true });
         }
+        return lines;
+    }
+
+    /**
+     * @param {number} seq - A kept frame.
+     * @param {PerfScriptLegend} legend - The script types with a band of their own.
+     * @returns {PerfHoverLine[]} The longest of the other script types in the frame, then how many
+     * more there were.
+     * @private
+     */
+    _otherScriptLines(seq, legend) {
+        const capture = this._capture;
+        const times = capture.scriptFigures(seq);
+        if (!times) return [];
+        const others = [];
+        for (let base = 0, id = 0; base < times.length; base += SCRIPT_STRIDE, id++) {
+            const v = times[base] + times[base + 1] + times[base + 2];
+            const n = times[base + SCRIPT_CALLS] + times[base + SCRIPT_CALLS + 1] + times[base + SCRIPT_CALLS + 2];
+            if (v > 0 && !legend.colors.has(id)) others.push({ id, v, n });
+        }
+        others.sort((a, b) => b.v - a.v);
+        /** @type {PerfHoverLine[]} */
+        const lines = others.slice(0, HOVER_SCRIPT_TYPES).map(({ id, v, n }) => ({ text: `${capture.scriptNames[id]} ${formatMs(v)} · ${callCount(n)}`, indent: true, nested: true }));
+        if (others.length > HOVER_SCRIPT_TYPES) lines.push({ text: `… and ${others.length - HOVER_SCRIPT_TYPES} more`, indent: true, nested: true });
         return lines;
     }
 
@@ -2222,14 +2816,14 @@ class PerfCharts {
             box.style.display = 'none';
             return;
         }
-        const signature = lines.map(line => `${line.color ?? ''}|${line.indent ? 1 : 0}|${line.strong ? 1 : 0}|${line.text}`).join('\n');
+        const signature = lines.map(line => `${line.color ?? ''}|${line.indent ? 1 : 0}|${line.nested ? 1 : 0}|${line.strong ? 1 : 0}|${line.text}`).join('\n');
         if (signature !== this._hoverSignatures.get(box)) {
             this._hoverSignatures.set(box, signature);
             const doc = box.ownerDocument;
             box.textContent = '';
             for (const line of lines) {
                 const lineEl = doc.createElement('div');
-                lineEl.className = `pci-perf-hover-line${line.indent ? ' pci-indent' : ''}${line.wrap ? ' pci-wrap' : ''}${line.strong ? ' pci-strong' : ''}`;
+                lineEl.className = `pci-perf-hover-line${line.indent ? ' pci-indent' : ''}${line.nested ? ' pci-nested' : ''}${line.wrap ? ' pci-wrap' : ''}${line.strong ? ' pci-strong' : ''}`;
                 if (line.color) {
                     const swatch = doc.createElement('span');
                     swatch.className = 'pci-perf-swatch';
@@ -2258,32 +2852,50 @@ class PerfCharts {
      * @private
      */
     _timelineLines(e) {
-        const rect = this._timeline.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-        const lane = this._lanes.find(l => y >= l.y - 1 && y < l.y + l.h + 1);
-        if (!lane) return [];
-        const bars = this._bars.filter(b => b.lane === lane.key);
-        if (!bars.length) return [];
-        const hovered = bars.find(b => x >= b.x0 && x < b.x1) ?? null;
+        const hit = this._timelineHit(e);
+        if (!hit) return [];
+        const { lane, bars, hovered } = hit;
+        const average = this.range ? ', average per frame' : '';
+        // the scripts list their types rather than the row
+        if (hovered?.children?.length) {
+            const at = Number.isFinite(hovered.start) ? ` at +${formatMs(hovered.start)}` : '';
+            /** @type {PerfHoverLine[]} */
+            const lines = [{ text: `${hovered.name} ${formatMs(hovered.duration)}${at}${average}` }];
+            const children = [...hovered.children].sort((a, b) => b.duration - a.duration);
+            for (const child of children.slice(0, HOVER_SCRIPT_TYPES)) {
+                const calls = child.calls !== undefined ? ` · ${callCount(child.calls)}` : '';
+                lines.push({ text: `${child.name} ${formatMs(child.duration)}${calls}`, color: child.color, indent: true });
+            }
+            if (hovered.pass) lines.push({ text: `Click to show ${hovered.name} on the Frame graph tab` });
+            if (children.length > HOVER_SCRIPT_TYPES) lines.push({ text: `… and ${children.length - HOVER_SCRIPT_TYPES} more`, indent: true });
+            return lines;
+        }
         // a total only where the bars add up to one: the breakdown is of two
         const timed = lane.key === 'cpu' || lane.key === 'gpu';
         const total = bars.reduce((sum, b) => sum + b.duration, 0);
-        const average = this.range ? ', average per frame' : '';
         /** @type {PerfHoverLine[]} */
         const lines = [{ text: `${lane.title}${timed ? ` ${formatMs(total)}` : ''}${average}` }];
         const sorted = lane.key === 'events' ? bars : [...bars].sort((a, b) => b.duration - a.duration);
-        const shown = sorted.slice(0, TIMELINE_HOVER_BARS);
+        const long = lane.key === 'types' || lane.key === 'gpu' || lane.key === 'gpuPasses';
+        const shown = sorted.slice(0, long ? HOVER_SCRIPT_TYPES : TIMELINE_HOVER_BARS);
         // the hovered bar is listed even when the list is cut short
         if (hovered && !shown.includes(hovered)) shown[shown.length - 1] = hovered;
         for (const b of shown) {
             const time = b.duration > 0 ? ` ${formatMs(b.duration)}` : '';
             const at = Number.isFinite(b.start) ? ` at +${formatMs(b.start)}` : '';
-            lines.push({ text: `${b.name}${time}${at}`, color: b.color, indent: true, strong: b === hovered });
+            const calls = b.calls !== undefined ? ` · ${callCount(b.calls)}` : '';
+            lines.push({ text: `${b.label ?? b.name}${time}${at}${calls}`, color: b.color, indent: true, strong: b === hovered });
         }
         if (sorted.length > shown.length) lines.push({ text: `… and ${sorted.length - shown.length} more`, indent: true });
+        if (hovered?.script !== undefined) lines.push({ text: `Click to show ${hovered.name} on the Scripts tab` });
+        if (hovered?.pass) lines.push({ text: `Click to show ${hovered.label ?? hovered.name} on the Frame graph tab` });
         if (lane.key === 'detail') {
-            lines.push({ text: 'The rest of the update is the scripts and the other components', wrap: true });
+            const scripted = bars.some(b => b.children);
+            lines.push({
+                text: scripted ? 'The rest of the update is the other components, and the cost of timing the scripts' :
+                    'The rest of the update is the scripts and the other components. Turn on Script timing to time the scripts',
+                wrap: true
+            });
             if (!this._capture.detailed) lines.push({ text: 'The phases of the render are timed by the profiler and debug engines', wrap: true });
         }
         return lines;
@@ -2309,11 +2921,28 @@ class PerfCharts {
             this.onCollapse();
             return;
         }
-        // a line of a line chart, or a row of events, from its box
+        // the rows of the Scripts list that show more script types, or fewer
+        if (x < 0 && row?.control) {
+            this.scriptRows = row.control === 'more' ? this.scriptRows + SCRIPT_ROWS : SCRIPT_ROWS;
+            this._showHover(null);
+            this.invalidate();
+            this.onCollapse();
+            return;
+        }
+        // a line of a line chart, or a row of events, from its box: Alt shows it alone, and Shift
+        // pins a script type
         const toggle = x >= 0 ? null : row?.lines ? this._lineToggle(row.lines, row.index) :
             row?.kind !== undefined && !eventUnsupported(this._capture, EVENT_KINDS[row.kind].key) ? `events:${EVENT_KINDS[row.kind].key}` : null;
         if (toggle) {
-            if (this.hidden.has(toggle)) this.hidden.delete(toggle);
+            const line = row.lines ? this._lineCharts[row.lines].lines[row.index] : null;
+            if (e.shiftKey && row.lines === 'scripts' && line.id >= 0) {
+                this._hoverSignatures.delete(this._hoverEl);
+                this.togglePin(line.name);
+                this._showHover(null);
+                return;
+            }
+            if (e.altKey && row.lines) this._solo(row.lines, row.index);
+            else if (this.hidden.has(toggle)) this.hidden.delete(toggle);
             else this.hidden.add(toggle);
             this._hoverSignatures.delete(this._hoverEl);
             this._showHover(e);
@@ -2342,6 +2971,7 @@ class PerfCharts {
             this.range = b >= a ? { from: a, to: b } : null;
             this._drawn.overlay = true;
             this._drawn.timeline = true;
+            this._checkScriptLegend();
             this.onChange();
         } else if (!press) {
             this._showHover(e);
@@ -2460,7 +3090,38 @@ class PerfCharts {
      */
     _onTimelineMove = (e) => {
         this._renderHover(this._timelineHoverEl, this._timelineEl, this._timelineLines(e), e, true);
+        const hovered = this._timelineHit(e)?.hovered;
+        this._timeline.style.cursor = hovered?.script !== undefined || hovered?.pass ? 'pointer' : '';
     };
+
+    /**
+     * A script type clicked on the timeline shows on the Scripts tab.
+     *
+     * @param {MouseEvent} e - The event.
+     * @private
+     */
+    _onTimelineClick = (e) => {
+        const hovered = this._timelineHit(e)?.hovered;
+        if (hovered?.script !== undefined) this.onSelectScript(hovered.script);
+        else if (hovered?.pass) this.onSelectPass(hovered.pass);
+    };
+
+    /**
+     * @param {MouseEvent} e - A pointer event on the frame timeline.
+     * @returns {{ lane: { key: string, title: string }, bars: PerfBar[], hovered: PerfBar|null }|null}
+     * The row under it, its bars and the bar under it, or null where there is no row with bars.
+     * @private
+     */
+    _timelineHit(e) {
+        const rect = this._timeline.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const lane = this._lanes.find(l => y >= l.y - 1 && y < l.y + l.h + 1);
+        if (!lane) return null;
+        const bars = this._bars.filter(b => b.lane === lane.key);
+        if (!bars.length) return null;
+        return { lane, bars, hovered: bars.find(b => x >= b.x0 && x < b.x1) ?? null };
+    }
 
     /** @private */
     _onTimelineLeave = () => {
