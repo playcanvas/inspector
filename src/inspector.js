@@ -125,7 +125,15 @@ const MIN_PERF_CHARTS_HEIGHT = 60;
 
 // the names a copy of each series of the Performance tab goes by
 const PERF_SERIES_NAMES = {
-    frame: 'Frame', cpu: 'CPU', gpu: 'GPU', draws: 'Draw calls', scripts: 'Scripts', memory: 'Memory', resources: 'Resources', events: 'Events'
+    frame: 'Frame',
+    cpu: 'CPU',
+    gpu: 'GPU',
+    draws: 'Draw calls',
+    scripts: 'Scripts',
+    loading: 'Loading',
+    memory: 'Memory',
+    resources: 'Resources',
+    events: 'Events'
 };
 
 // the tooltips of the tabs
@@ -134,7 +142,7 @@ const TAB_TIPS = {
     cameras: 'The cameras of the scene in render order, with where they draw, their render mode and a way to fly each',
     assets: 'The assets of the registry, and what uses each',
     passes: 'The passes that rendered the last frame, with the layers, draws and targets of each',
-    perf: 'Record frames and chart their CPU and GPU time, draw calls, memory and events over the whole capture.\nClick a frame to see everything recorded for it, drag to select frames, scroll to zoom, double-click to see\nthe whole capture. A dashed line marks the display interval, red ticks the hitches',
+    perf: 'Record frames and chart their CPU and GPU time, draw calls, memory and events over the whole capture.\nClick a frame to see everything recorded for it, drag to select frames, scroll to zoom, Shift+drag to pan,\ndouble-click to see the whole capture. A dashed line marks the display interval, red ticks the hitches',
     targets: 'The render targets on the device, with a live preview of their textures',
     textures: 'The textures on the device, largest first, with a live preview',
     meshes: 'The meshes of the app, found through the components, layers and assets using them, largest first',
@@ -223,7 +231,7 @@ function isTextTarget(e) {
  * - Performance: frames recorded while Record is on, up to the last 1000, charted over
  *   the whole capture: the frame interval, the CPU time on the main thread by phase, the GPU time,
  *   the draw calls and video memory, and the events of each frame, such as shaders compiled and
- *   long animation frames. Clicking a frame shows it on a timeline of its own and everything
+ *   the main thread blocked. Clicking a frame shows it on a timeline of its own and everything
  *   recorded for it in the property view; dragging selects frames to compare their figures. The
  *   inspector's own time is told apart from the app's.
  * - Render targets: every render target on the device including the backbuffer, with its
@@ -1710,6 +1718,10 @@ class Inspector {
             if (cls) this._selectAny(cls);
         };
         this._perfCharts.onSelectPass = pass => this._showPass(pass);
+        this._perfCharts.onSelectAsset = (id) => {
+            const asset = this._app.assets.get(id);
+            if (asset) this._selectAny(asset);
+        };
         this._perfCharts.onCollapse = () => this._saveSettings();
         this._perfInspectorToggle.addEventListener('change', () => {
             this._perfCharts.showInspector = this._perfInspectorToggle.checked;
@@ -2125,6 +2137,7 @@ class Inspector {
         }
         if (typeof stored.perfScripts === 'boolean') this._setScriptTiming(stored.perfScripts);
         if (Number.isInteger(stored.perfScriptRows) && stored.perfScriptRows > 0) this._perfCharts.scriptRows = stored.perfScriptRows;
+        if (Number.isFinite(stored.perfGutter)) this._perfCharts.gutter = stored.perfGutter;
         if (Array.isArray(stored.perfPinned)) {
             this._perfCharts.pinned = new Set(stored.perfPinned.filter(name => typeof name === 'string'));
         }
@@ -2170,6 +2183,7 @@ class Inspector {
                 perfInspector: this._perfInspectorToggle.checked,
                 perfScripts: this._perfScriptsToggle.checked,
                 perfScriptRows: this._perfCharts.scriptRows,
+                perfGutter: this._perfCharts.gutter,
                 perfPinned: [...this._perfCharts.pinned],
                 perfCollapsed: [...this._perfCharts.collapsed],
                 perfHidden: [...this._perfCharts.hidden],
@@ -3322,7 +3336,7 @@ class Inspector {
         const capture = this._perf;
         const charts = this._perfCharts;
         const { from, to } = charts.copyRange;
-        const frames = charts.range ? `, frames ${from + 1}–${to + 1}` : '';
+        const frames = charts.range ? `, ${capture.rangeLabel(from, to).toLowerCase()}` : '';
         const figures = json => ({ json, objects: 0, truncated: false });
         switch (what.kind) {
             case 'capture': {
@@ -3335,14 +3349,14 @@ class Inspector {
                 return {
                     title: `${name}${frames}`,
                     plain: true,
-                    copy: () => figures({ series: name, range: { from: from + 1, to: to + 1, frames: to - from + 1 }, rows: seriesRows(capture, what.key, from, to) }),
+                    copy: () => figures({ series: name, range: { from: capture.frameNumber(from), to: capture.frameNumber(to), frames: to - from + 1 }, rows: seriesRows(capture, what.key, from, to) }),
                     csv: () => toCsv(seriesRows(capture, what.key, from, to))
                 };
             }
             case 'frame':
-                return { title: `Frame ${what.seq + 1}`, plain: true, copy: () => figures(frameJson(capture, what.seq)) };
+                return { title: capture.label(what.seq), plain: true, copy: () => figures(frameJson(capture, what.seq)) };
             case 'range':
-                return { title: `Frames ${from + 1}–${to + 1}`, plain: true, copy: () => figures(rangeJson(capture, from, to)) };
+                return { title: capture.rangeLabel(from, to), plain: true, copy: () => figures(rangeJson(capture, from, to)) };
             case 'timeline': {
                 const json = charts.timelineJson();
                 return json ? { title: `${json.title}, timeline`, plain: true, copy: () => figures(json) } : null;
@@ -3611,8 +3625,8 @@ class Inspector {
                         if (isHitch(capture, seq, median)) hitches++;
                     }
                     counts += ` · median ${formatMs(median)} · ${hitches} hitch${hitches === 1 ? '' : 'es'}`;
-                    selected = charts.range ? `Frames ${charts.range.from + 1}–${charts.range.to + 1}` :
-                        `Frame ${charts.shown + 1}${charts.following ? ', the newest' : ''}`;
+                    selected = charts.range ? capture.rangeLabel(charts.range.from, charts.range.to) :
+                        `${capture.label(charts.shown)}${charts.following ? ', the newest' : ''}`;
                 }
                 break;
             }

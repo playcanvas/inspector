@@ -1,6 +1,6 @@
 import { EVENT_KINDS, captureNorms, eventLines, eventMask, isHitch, rangeStats } from './perf-view.js';
 
-/** @import { PerfCapture } from './perf-capture.js' */
+/** @import { PerfCapture, PerfLoad } from './perf-capture.js' */
 
 /**
  * The series a chart, or a section under the charts, copies: the figures of each frame, by the
@@ -68,8 +68,42 @@ function passesOf(capture, seq) {
 }
 
 /**
+ * @param {PerfLoad} load - Something that loaded, or a moment.
+ * @param {number} tick - When the entry it is in began, which its times count from.
+ * @returns {object} It: what it was, when it began and how long it took, its request and its size.
+ * A moment has only when it was.
+ */
+function loadJson(load, tick) {
+    if (load.kind === 'milestone') return { kind: load.kind, name: load.name, at: load.start - tick };
+    /** @type {any} */
+    const out = { kind: load.kind, name: load.name };
+    if (load.type) out.type = load.type;
+    if (load.url && load.url !== load.name) out.url = load.url;
+    // an asset that began loading before recording did has no start
+    if (Number.isFinite(load.start)) {
+        out.start = load.start - tick;
+        out.duration = load.end - load.start;
+    }
+    out.end = load.end - tick;
+    if (Number.isFinite(load.netEnd)) {
+        out.request = {
+            start: load.netStart - tick,
+            duration: load.netEnd - load.netStart,
+            ...(load.firstByte > 0 ? { firstByte: load.firstByte - load.netStart } : {})
+        };
+    }
+    if (load.bytes > 0) out.bytes = load.bytes;
+    if (load.cached) out.cached = true;
+    if (load.failed) out.failed = true;
+    return out;
+}
+
+/**
  * Everything recorded for a frame. Durations are in milliseconds, memory in bytes; a figure the
  * engine did not provide is left out.
+ *
+ * The start of the app, when the capture began with it, has how long it lasted, what loaded and
+ * the moments in it, with times from the page opening.
  *
  * @param {PerfCapture} capture - The capture.
  * @param {number} seq - A kept frame.
@@ -80,7 +114,7 @@ function frameJson(capture, seq) {
     const s = capture.slot(seq);
     const first = capture.slot(capture.first);
     /** @type {any} */
-    const frame = { frame: seq + 1 };
+    const frame = { frame: capture.frameNumber(seq), ...(capture.isStartup(seq) ? { startup: true, duration: d.width[s] } : {}) };
     put(frame, capture, s, [['appFrame', 'appFrame']]);
     frame.time = (d.tick[s] - d.tick[first]) / 1000;
     frame.rendered = d.version[s] >= 0;
@@ -115,6 +149,8 @@ function frameJson(capture, seq) {
             ...(event.detail ? { detail: event.detail } : {})
         }));
     }
+    const loads = capture.loads(seq);
+    if (loads.length) frame.loads = loads.map(load => loadJson(load, d.tick[s]));
     return frame;
 }
 
@@ -160,7 +196,7 @@ function scriptsJson(capture, seq) {
 function header(capture, from, to) {
     const { budget, median } = captureNorms(capture);
     return {
-        range: { from: from + 1, to: to + 1, frames: to - from + 1 },
+        range: { from: capture.frameNumber(from), to: capture.frameNumber(to), frames: to - from + 1 },
         medianFrame: median,
         displayInterval: budget,
         engineBuild: capture.detailed ? 'profiler or debug' : 'release',
@@ -187,12 +223,13 @@ function captureJson(capture, from, to, device) {
 /**
  * The series of a chart or section, a row per frame: the frame and its figures. The GPU series
  * has a column per pass, the scripts series a column per script type and only the frames that
- * timed scripts, and the events series lists only the frames that had events, with what happened
- * by kind.
+ * timed scripts, the events series lists only the frames that had events, with what happened
+ * by kind, and the loading series has a row per asset, request and moment, in the frame it ended
+ * in.
  *
  * @param {PerfCapture} capture - The capture.
  * @param {string} key - The chart or section: 'frame', 'cpu', 'gpu', 'draws', 'scripts',
- * 'memory', 'resources' or 'events'.
+ * 'loading', 'memory', 'resources' or 'events'.
  * @param {number} from - The first frame.
  * @param {number} to - The last frame, inclusive.
  * @returns {object[]} The rows.
@@ -205,23 +242,35 @@ function seriesRows(capture, key, from, to) {
             const mask = eventMask(capture, seq);
             if (!mask) continue;
             /** @type {any} */
-            const row = { frame: seq + 1 };
+            const row = { frame: capture.frameNumber(seq) };
             EVENT_KINDS.forEach((kind, i) => {
                 if (mask & (1 << i)) row[kind.key] = eventLines(capture, seq, kind.key);
             });
             rows.push(row);
             continue;
         }
+        if (key === 'loading') {
+            const tick = capture.data.tick[s];
+            for (const load of capture.loads(seq)) {
+                const { request, ...rest } = /** @type {any} */ (loadJson(load, tick));
+                rows.push({
+                    frame: capture.frameNumber(seq),
+                    ...rest,
+                    ...(request ? { requestStart: request.start, requestDuration: request.duration, firstByte: request.firstByte } : {})
+                });
+            }
+            continue;
+        }
         if (key === 'scripts') {
             if (!capture.scriptFigures(seq)) continue;
             /** @type {any} */
-            const row = { frame: seq + 1, total: capture.data.scriptsTotal[s] };
+            const row = { frame: capture.frameNumber(seq), total: capture.data.scriptsTotal[s] };
             for (const type of capture.scripts(seq)) row[type.name] = type.update + type.post + type.init;
             rows.push(row);
             continue;
         }
         /** @type {any} */
-        const row = put({ frame: seq + 1 }, capture, s, SERIES[key]);
+        const row = put({ frame: capture.frameNumber(seq) }, capture, s, SERIES[key]);
         if (key === 'cpu' && capture.detailed) put(row, capture, s, RENDER_PHASES);
         if (key === 'gpu') {
             for (const [name, time] of Object.entries(passesOf(capture, seq))) row[`pass ${name}`] = time;

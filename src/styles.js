@@ -699,6 +699,9 @@ ${ICON_RULES}
 
     .pci-perf-hover-line.pci-nested {
         padding-left: 25px;
+    }
+
+    .pci-perf-hover-line.pci-muted {
         color: #93a2a6;
     }
 
@@ -708,7 +711,13 @@ ${ICON_RULES}
 
     .pci-perf-hover-line.pci-wrap {
         white-space: normal;
+        overflow-wrap: anywhere;
         width: 280px;
+    }
+
+    .pci-perf-hover-line.pci-wrap .pci-perf-swatch {
+        align-self: flex-start;
+        margin-top: 4px;
     }
 
     .pci-perf-swatch {
