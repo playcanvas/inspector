@@ -78,47 +78,48 @@ draws the JavaScript heap, the video memory and each kind of it as lines sharing
 Resources chart the count of textures, render targets, shaders, buffers and pipelines; untick a line
 in the list beside a chart to hide it, and the chart rescales to the others. The Events section has
 a row, which can be unticked too, for each kind of event, marking the frames that had one: hitches,
-main thread blocked, shaders compiled, garbage collections, resources created or destroyed and the
-app's own measures; the assets loading are in the Loading section. A hitch is a frame taking over
-twice the median, whatever held it back, so it is what the user sees stutter. Main thread blocked is
-what the browser reports, in Chromium browsers, as a long animation frame: its main thread busy for
-50 ms or more, with the script that ran longest, during a frame or between them. It tells why a
-frame was slow: a hitch without it was held back by the GPU, the browser or the display, which its
-hover says. Click the name of a chart or a section to collapse it. Hover a mark for what happened,
-or a chart for the figures of the frame under the pointer. A dashed line marks the display interval
-on the Frame, CPU and GPU charts, which are scaled to show it.
+main thread blocked, lightmap bakes (for an app with a lightmapper), shaders compiled, garbage
+collections, resources created or destroyed and the app's own measures; the assets loading are in
+the Loading section. A hitch is a frame taking over twice the median, whatever held it back, so it
+is what the user sees stutter. Main thread blocked is what the browser reports, in Chromium
+browsers, as a long animation frame: its main thread busy for 50 ms or more, with the script that
+ran longest, during a frame or between them. It tells why a frame was slow: a hitch without it was
+held back by the GPU, the browser or the display, which its hover says. Click the name of a chart or
+a section to collapse it. Hover a mark for what happened, or a chart for the figures of the frame
+under the pointer. A dashed line marks the display interval on the Frame, CPU and GPU charts, which
+are scaled to show it.
 
 Click a frame, or a mark, to show it on a timeline of its own, and everything recorded for it below:
 what held it back, the CPU time by phase, the GPU time of each pass, what loaded in it, the work it
 submitted, memory and resources, and its events. The timeline is a flame chart: the update,
-post-update, inspector and render of the CPU, with the physics step, the animation and the phases of
-the render under them, then the GPU passes, the events, and the moments, assets and requests of the
-frame. With frames selected together, it shows their average frame. Scroll over the timeline to zoom
-into part of the frame, drag the scrollbar under it, or drag across it holding Shift, to pan, and
-double-click it to see the whole frame again; click its title to collapse it. Drag the divider
-between the names and the charts, or the timeline, to make the names wider. Drag across the charts
-to select frames together, with their averages, 95th percentiles and largest figures; scroll to
-zoom, then drag the scrollbar under the charts, or drag across them holding Shift, to pan, and
-double-click to see the whole capture again. **‹** and **›** step a frame, **«** shows the first and
-**»** the newest, following it as frames are recorded. While the panel has focus, the arrow keys
-step a frame (ten with <kbd>Shift</kbd>), <kbd>Home</kbd> shows the first and <kbd>End</kbd> follows
-the newest.
+post-update, inspector and render of the CPU, and any lightmap bake where it ran, with the physics
+step, the animation and the phases of the render under them, then the GPU passes, the events, and
+the moments, assets and requests of the frame. With frames selected together, it shows their average
+frame. Scroll over the timeline to zoom into part of the frame, drag the scrollbar under it, or drag
+across it holding Shift, to pan, and double-click it to see the whole frame again; click its title
+to collapse it. Drag the divider between the names and the charts, or the timeline, to make the
+names wider. Drag across the charts to select frames together, with their averages, 95th percentiles
+and largest figures; scroll to zoom, then drag the scrollbar under the charts, or drag across them
+holding Shift, to pan, and double-click to see the whole capture again. **‹** and **›** step a
+frame, **«** shows the first and **»** the newest, following it as frames are recorded. While the
+panel has focus, the arrow keys step a frame (ten with <kbd>Shift</kbd>), <kbd>Home</kbd> shows the
+first and <kbd>End</kbd> follows the newest.
 
-Turn on **GPU timings** to record the GPU time. On WebGPU each pass is timed, and the timeline
-draws the GPU as a flame chart: the effects, such as bloom or depth of field, on the GPU line, with
-the passes each runs under it, and the passes of their own on the GPU line too. The effect of a
-pass comes from the frame graph, the pass it is a before or after pass of; where the frame graph
-no longer matches the passes timed, every pass goes on the GPU line. Passes of one name in a row
-share a label, as Downsample ×5, the frame details list the time of each, and clicking a pass or an
-effect shows it on the Frame graph tab. An engine that sums the passes sharing a name, before
-2.24, gives one time for each name, and WebGL times the frame as a whole. An engine whose GPU
-profiler does not say which frame its timings belong to, such as 2.23, gets them a few frames late,
-which the tab notes. The
-inspector runs inside the app's update, so its own time is shown apart, as Inspector; turn off
-**Inspector time** to leave it out of the CPU chart, which then scales to the app's own time. The
-release engine times the update and the render as a whole; the profiler and debug engines add the
-phases of the render and the breakdown of the draw calls. Spans the app measures with
-`performance.measure` show on the timeline of their frame.
+Turn on **GPU timings** to record the GPU time. On WebGPU each pass is timed, and the timeline draws
+the GPU as a flame chart: the effects, such as bloom or depth of field, on the GPU line, with the
+passes each runs under it, and the passes of their own on the GPU line too. The effect of a pass
+comes from the frame graph, the pass it is a before or after pass of; where the frame graph no
+longer matches the passes timed, every pass goes on the GPU line. Passes of one name in a row share
+a label, as Downsample ×5, the frame details list the time of each, and clicking a pass or an effect
+shows it on the Frame graph tab. An engine that sums the passes sharing a name, before 2.24, gives
+one time for each name, and WebGL times the frame as a whole. An engine whose GPU profiler does not
+say which frame its timings belong to, such as 2.23, gets them a few frames late, which the tab
+notes. The inspector runs inside the app's update, so its own time is shown apart, as Inspector;
+turn off **Inspector time** to leave it out of the CPU chart, which then scales to the app's own
+time. The release engine times the update and the render as a whole; the profiler and debug engines
+add the phases of the render, the batcher's updating and creating of batches among them, and the
+breakdown of the draw calls. Spans the app measures with `performance.measure` show on the timeline
+of their frame.
 
 Turn on **Script timing** to time each script type while recording: the time of its `update`,
 `postUpdate` and `initialize` calls, without the calls nested in them, such as the scripts of an
@@ -136,6 +137,18 @@ microsecond, estimated as recording starts and counted as the inspector's time. 
 event handlers, timers and promises is not counted. On a page that is not cross-origin isolated,
 the browser's clock steps by a tenth of a millisecond, so the times of small scripts read best over
 many frames selected together.
+
+The Counters section charts the counters the app keeps in `app.stats.user`, as each frame ended: a
+line each, with a scale of its own, as their units are the app's. The frame details list their
+values, and the frames selected together their averages, 95th percentiles and largest:
+
+```javascript
+// counted afresh each frame
+app.on('frameupdate', () => app.stats.user.set('enemies', 0));
+
+// wherever the app counts them
+app.stats.user.set('enemies', app.stats.user.get('enemies') + 1);
+```
 
 To record from the first frame the app runs, pass `record: true` to the constructor, or set the
 `record` attribute of the `EntityInspector` script. Create the inspector before the app runs its

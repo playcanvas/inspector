@@ -3,7 +3,7 @@ import { SCRIPT_CALLS, SCRIPT_ORDER, SCRIPT_STRIDE } from './perf-capture.js';
 import {
     ASSET_COLOR, ASSET_COLORS, ASSET_KINDS, CPU_PARTS, EVENT_KINDS, FAILED_COLOR, HITCH_FACTOR, MILESTONE_COLOR, OTHER_SCRIPTS_COLOR,
     RENDER_PHASES, REQUEST_COLOR, SCRIPT_ROWS, callCount, captureNorms, effectName, eventLines, eventMask, eventUnsupported, formatCount,
-    formatDuration, formatMs, loadColor, loadText, scriptLegend
+    formatDuration, formatMs, formatValue, loadColor, loadText, previousSlot, scriptColorAt, scriptLegend
 } from './perf-view.js';
 
 /** @import { PerfCapture, PerfLoad } from './perf-capture.js' */
@@ -36,6 +36,7 @@ import {
  * @property {string} name - The display name.
  * @property {string} color - The color it is drawn in.
  * @property {string} [unsupported] - Why it cannot show, where it cannot.
+ * @property {Float64Array} [values] - The ring it draws, where it is not a channel of the capture.
  */
 
 /**
@@ -93,7 +94,7 @@ import {
  * @property {number} [chart] - The index of the chart it holds, into {@link CHARTS}.
  * @property {PerfLevels} [levels] - How a height in it reads as a value, for a chart.
  * @property {string} [lines] - The section of the line chart it is a line of the list of:
- * 'scripts', 'memory' or 'resources'.
+ * 'scripts', 'counters', 'memory' or 'resources'.
  * @property {number} [index] - Which line of that list it is, -1 for a row that is not one.
  * @property {'more'|'fewer'} [control] - The row of the Scripts list it is that shows more script
  * types, or fewer.
@@ -136,6 +137,8 @@ import {
  * Frame graph tab.
  * @property {number} [asset] - The id of the asset it is the loading of, which a click shows on the
  * Assets tab.
+ * @property {boolean} [phase] - Whether it is a phase of the render, placed after the one before
+ * it rather than where it ran.
  * @property {number} [labelEnd] - Where its label stops, in milliseconds into the frame: where the
  * next bar of its lane begins.
  * @property {number} [run] - How many passes of its name follow on in a row from it, it among
@@ -272,7 +275,7 @@ const RESOURCES = [
 
 // the phases of the render on the frame timeline, with their colors: shades around the green of
 // the render
-const RENDER_TIMELINE = RENDER_PHASES.map(([key, name], i) => [key, name, ['#34c759', '#8be0a4', '#00c7be', '#64d2ff', '#a2e85b', '#30b0c7', '#c4f0a0'][i]]);
+const RENDER_TIMELINE = RENDER_PHASES.map(([key, name], i) => [key, name, ['#66d4cf', '#34c759', '#8be0a4', '#00c7be', '#64d2ff', '#a2e85b', '#30b0c7', '#c4f0a0'][i]]);
 
 // the colors GPU passes cycle through in the frame timeline
 const PASS_COLORS = ['#bf5af2', '#0a84ff', '#30d158', '#ff9f0a', '#ff375f', '#64d2ff', '#ffd60a', '#5e5ce6'];
@@ -366,6 +369,11 @@ const SCRIPT_ROW = 13;
 // the fewest rows the Scripts chart is tall, for an app of few script types
 const SCRIPT_CHART_ROWS = 3;
 const MEMORY_ROW = 13;
+// the least range of a counter's line, a share of its largest value or else a least amount, so a
+// counter that barely changes is flat
+const COUNTER_MIN_SHARE = 0.05;
+const COUNTER_MIN_RANGE = 1e-3;
+const COUNTERS_TIP = 'Counters the app keeps in app.stats.user, as each frame ended: set a counter by name, and reset it on frameupdate to count per frame. Each line has a scale of its own, as their units are the app\'s';
 const RESOURCE_ROW = 13;
 const EVENT_ROW = 10;
 const TIMELINE_HEIGHT = 88;
@@ -688,7 +696,7 @@ class PerfCharts {
      * @type {{ scripts: PerfLineChart|null, memory: PerfLineChart|null, resources: PerfLineChart|null }}
      * @private
      */
-    _lineCharts = { scripts: null, memory: null, resources: null };
+    _lineCharts = { scripts: null, counters: null, memory: null, resources: null };
 
     /**
      * The first and one past the last frame of each column when last drawn.
@@ -1348,7 +1356,11 @@ class PerfCharts {
         const resourcesHeight = SECTION_TITLE + (resourcesOpen ? resources.length * RESOURCE_ROW : 0);
         const memoryOpen = !this.collapsed.has('memory');
         const memoryHeight = SECTION_TITLE + (memoryOpen ? MEMORY.length * MEMORY_ROW : 0);
-        const eventsHeight = SECTION_TITLE + (eventsOpen ? EVENT_KINDS.length * EVENT_ROW : 0);
+        const eventKinds = this._eventKinds();
+        const eventsHeight = SECTION_TITLE + (eventsOpen ? eventKinds.length * EVENT_ROW : 0);
+        const counters = this._counterList();
+        const countersOpen = !this.collapsed.has('counters');
+        const countersHeight = SECTION_TITLE + (countersOpen ? Math.max(1, counters.length) * RESOURCE_ROW : 0);
         // a collapsed chart keeps only its title, the open ones share the rest
         let openCharts = 0;
         for (let i = 0; i < CHARTS.length; i++) {
@@ -1356,7 +1368,7 @@ class PerfCharts {
         }
         const loadingOpen = !this.collapsed.has('loading');
         const loadingHeight = SECTION_TITLE + (loadingOpen ? LOADING_ROWS.reduce((sum, row) => sum + row.height + 1, 0) : 0);
-        const sections = scriptsHeight + loadingHeight + memoryHeight + resourcesHeight + eventsHeight + (CHARTS.length - openCharts) * SECTION_TITLE + CHART_GAP * (CHARTS.length + 4);
+        const sections = scriptsHeight + countersHeight + loadingHeight + memoryHeight + resourcesHeight + eventsHeight + (CHARTS.length - openCharts) * SECTION_TITLE + CHART_GAP * (CHARTS.length + 5);
 
         // taller than the box when the charts would get too short in it: the box scrolls then
         const contentHeight = Math.max(this._sizeOf(this._chartsEl).height, sections + openCharts * MIN_CHART_HEIGHT);
@@ -1516,8 +1528,19 @@ class PerfCharts {
         this._lineCharts.scripts = scriptsOpen ?
             this._drawScriptChart(ctx, scripts, scriptsTop + SECTION_TITLE, width, plot, lo, hi, wide, visibleFrom, visibleTo, bars, barX, barW) : null;
 
+        // the app's own counters, a line each on a scale of its own, as their units are the app's
+        const countersTop = scriptsTop + scriptsHeight + CHART_GAP;
+        this._sectionTitle(ctx, 'counters', 'Counters', countersTop, countersOpen);
+        this._lineCharts.counters = countersOpen && counters.length ?
+            this._drawLineChart(ctx, 'counters', counters, formatValue, max => Math.max(Math.abs(max) * COUNTER_MIN_SHARE, COUNTER_MIN_RANGE),
+                countersTop + SECTION_TITLE, RESOURCE_ROW, width, plot, lo, hi, wide, visibleFrom, visibleTo, bars, barX, barW, true) : null;
+        if (countersOpen && !counters.length) {
+            const text = capture.supports.counters ? 'Counters the app sets in app.stats.user show here' : 'This engine has no app.stats.user for counters of the app';
+            this._message(ctx, text, '#7f8f93', plot, countersTop + SECTION_TITLE + RESOURCE_ROW / 2 - 5);
+        }
+
         // what loaded, on the time axis
-        const loadingTop = scriptsTop + scriptsHeight + CHART_GAP;
+        const loadingTop = countersTop + countersHeight + CHART_GAP;
         this._sectionTitle(ctx, 'loading', 'Loading', loadingTop, loadingOpen);
         this._loadingDrawn = {};
         if (loadingOpen) this._drawLoading(ctx, loadingTop + SECTION_TITLE, plot, from, span);
@@ -1550,11 +1573,12 @@ class PerfCharts {
                     for (let seq = lo[i]; seq < hi[i]; seq++) masks[i] |= eventMask(capture, seq);
                 }
             }
-            for (let k = 0; k < EVENT_KINDS.length; k++) {
+            for (let r = 0; r < eventKinds.length; r++) {
+                const k = eventKinds[r];
                 const kind = EVENT_KINDS[k];
-                const top = eventsTop + SECTION_TITLE + k * EVENT_ROW;
+                const top = eventsTop + SECTION_TITLE + r * EVENT_ROW;
                 this._rows.push({ top, height: EVENT_ROW, kind: k });
-                ctx.fillStyle = k % 2 ? 'rgba(255, 255, 255, 0.02)' : 'rgba(255, 255, 255, 0.04)';
+                ctx.fillStyle = r % 2 ? 'rgba(255, 255, 255, 0.02)' : 'rgba(255, 255, 255, 0.04)';
                 ctx.fillRect(this._gutter, top, plot, EVENT_ROW);
                 const unsupported = !!eventUnsupported(capture, kind.key);
                 const on = !unsupported && !this.hidden.has(`events:${kind.key}`);
@@ -2176,10 +2200,12 @@ class PerfCharts {
      * @param {number} bars - How many bars there are.
      * @param {Int32Array} barX - The left edge of each bar.
      * @param {Int32Array} barW - The width of each bar.
+     * @param {boolean} [own] - Whether each line has a scale of its own, from its smallest to its
+     * largest value in view, as lines of different units do. The chart then reads no levels.
      * @returns {PerfLineChart} What it drew, for the pointer.
      * @private
      */
-    _drawLineChart(ctx, section, lines, format, least, top, rowHeight, width, plot, lo, hi, wide, visibleFrom, visibleTo, bars, barX, barW) {
+    _drawLineChart(ctx, section, lines, format, least, top, rowHeight, width, plot, lo, hi, wide, visibleFrom, visibleTo, bars, barX, barW, own = false) {
         const capture = this._capture;
         const d = capture.data;
         const slots = capture.slots;
@@ -2200,7 +2226,7 @@ class PerfCharts {
             ctx.fillStyle = on ? '#b9c4c7' : '#56656a';
             this._gutterText(ctx, line.name, 23, y + 1);
             if (!on) continue;
-            PerfCharts._rangeOf(d[line.key], slots, visibleFrom, visibleTo, range);
+            PerfCharts._rangeOf(line.values ?? d[line.key], slots, visibleFrom, visibleTo, range);
             if (range[0] < min) min = range[0];
             if (range[1] > max) max = range[1];
         }
@@ -2211,6 +2237,28 @@ class PerfCharts {
         /** @type {PerfLineChart} */
         const drawn = { lines, format, pick, min: 0, max: 0, levels: null };
         if (!(max >= min)) return drawn;
+
+        // each line from its own smallest to its own largest, spread to the least range
+        if (own) {
+            ctx.lineWidth = 1.5;
+            for (const line of lines) {
+                if (line.unsupported || this.hidden.has(`${section}:${line.key}`)) continue;
+                const values = line.values ?? d[line.key];
+                PerfCharts._rangeOf(values, slots, visibleFrom, visibleTo, range);
+                let lineMin = range[0];
+                let lineMax = range[1];
+                if (!(lineMax >= lineMin)) continue;
+                const spread = least(lineMax);
+                if (lineMax - lineMin < spread) {
+                    lineMin = (lineMin + lineMax) / 2 - spread / 2;
+                    lineMax = lineMin + spread;
+                }
+                ctx.strokeStyle = line.color;
+                PerfCharts._drawLine(ctx, values, slots, wide ? null : pick, visibleFrom, bars, barX, barW, top + height - 2, height - 4, lineMin, lineMax);
+            }
+            ctx.lineWidth = 1;
+            return drawn;
+        }
 
         const span = least(max);
         if (max - min < span) {
@@ -2228,7 +2276,7 @@ class PerfCharts {
             const line = lines[i];
             if (line.unsupported || this.hidden.has(`${section}:${line.key}`)) continue;
             ctx.strokeStyle = line.color;
-            PerfCharts._drawLine(ctx, d[line.key], slots, wide ? null : pick, visibleFrom, bars, barX, barW, top + height - 2, height - 4, min, max);
+            PerfCharts._drawLine(ctx, line.values ?? d[line.key], slots, wide ? null : pick, visibleFrom, bars, barX, barW, top + height - 2, height - 4, min, max);
         }
         ctx.lineWidth = 1;
         PerfCharts._label(ctx, format(max), width - 3, top + 1, 'right');
@@ -2285,6 +2333,30 @@ class PerfCharts {
      */
     _resourceList() {
         return this._capture.supports.pipelines ? RESOURCES : RESOURCES.filter(resource => resource.key !== 'pipelines');
+    }
+
+    /**
+     * @returns {number[]} The kinds of event the Events section has a row for, by their index into
+     * {@link EVENT_KINDS}: the bakes of lightmaps only for an app with a lightmapper.
+     * @private
+     */
+    _eventKinds() {
+        const lightmapper = this._capture.supports.lightmapper;
+        const kinds = [];
+        for (let k = 0; k < EVENT_KINDS.length; k++) {
+            if (EVENT_KINDS[k].key !== 'bake' || lightmapper) kinds.push(k);
+        }
+        return kinds;
+    }
+
+    /**
+     * @returns {PerfLine[]} The lines of the Counters chart, one for each counter of
+     * `app.stats.user` the app has set, in the order it first set them.
+     * @private
+     */
+    _counterList() {
+        const capture = this._capture;
+        return capture.counterNames.map((name, id) => ({ key: name, name, color: scriptColorAt(id), values: capture.counterRings[id] }));
     }
 
     /**
@@ -2499,7 +2571,7 @@ class PerfCharts {
         };
 
         /** @type {PerfTimeBar[]} */
-        const bars = [];
+        let bars = [];
         const phase = (lane, startKey, key, color, name) => {
             bars.push({ lane, start: start(startKey), duration: mean(key), color, name, positioned: true });
         };
@@ -2569,7 +2641,7 @@ class PerfCharts {
             let at = start('renderStart');
             for (const [key, name, phaseColor] of RENDER_TIMELINE) {
                 const time = mean(key);
-                bars.push({ lane: 'detail', start: at, duration: time, color: phaseColor, name, positioned: false });
+                bars.push({ lane: 'detail', start: at, duration: time, color: phaseColor, name, positioned: false, phase: true });
                 at += time;
             }
         }
@@ -2578,15 +2650,28 @@ class PerfCharts {
 
         // the events of a single frame, and what loaded during it; an average frame has none of
         // its own
+        let bakedInRender = false;
         if (!range) {
             const tick = d.tick[capture.slot(from)];
             for (const event of capture.events(from)) {
-                const kind = EVENT_KINDS.find(k => k.key === (event.kind === 'long' ? 'long' : 'marker'));
+                const kind = EVENT_KINDS.find(k => k.key === event.kind) ?? EVENT_KINDS.find(k => k.key === 'marker');
                 const at = Math.max(0, event.start - tick);
-                bars.push({ lane: 'events', start: at, duration: event.duration - (at - (event.start - tick)), color: kind.color, name: event.name, positioned: true, instant: event.duration <= 0 });
+                const duration = event.duration - (at - (event.start - tick));
+                // a bake is work of the CPU: on its line where it ran, as in the app's update
+                // event, or on the line below inside the part of the frame it ran in
+                if (event.kind === 'bake') {
+                    const inside = bars.find(bar => bar.lane === 'cpu' && bar.start < at + duration && bar.start + bar.duration > at);
+                    bars.push({ lane: inside ? 'detail' : 'cpu', start: at, duration, color: kind.color, name: 'Lightmap bake', positioned: true });
+                    // a bake in the render, as the engine's first, puts its own rendering into the
+                    // times of the render's phases, which would count it twice beside it
+                    if (inside?.name === 'Render') bakedInRender = true;
+                    continue;
+                }
+                bars.push({ lane: 'events', start: at, duration, color: kind.color, name: event.name, positioned: true, instant: event.duration <= 0 });
             }
             this._loadBars(from, bars);
         }
+        if (bakedInRender) bars = bars.filter(bar => !bar.phase);
 
         const title = range ? `${capture.rangeLabel(from, to)}, average` : capture.label(from);
         // the start of the app has no frame interval: it is as long as it lasted
@@ -3149,7 +3234,10 @@ class PerfCharts {
         const capture = this._capture;
         const { x, row, column } = this._locate(e);
         if (!row) return [];
-        if (row.section) return [{ text: this.collapsed.has(row.section) ? 'Click to expand' : 'Click to collapse' }];
+        if (row.section) {
+            const toggle = { text: this.collapsed.has(row.section) ? 'Click to expand' : 'Click to collapse' };
+            return row.section === 'counters' ? [{ text: COUNTERS_TIP, wrap: true }, toggle] : [toggle];
+        }
         const chart = row.chart !== undefined ? CHARTS[row.chart] : null;
         const kind = row.kind !== undefined ? EVENT_KINDS[row.kind] : null;
         if (row.lines) return this._lineChartLines(row.lines, row.index, x, column, row.control);
@@ -3297,13 +3385,14 @@ class PerfCharts {
             }
             return lines;
         }
-        const p = capture.has(seq - 1) ? capture.slot(seq - 1) : -1;
-        const entries = drawn.lines.map(l => ({ l, v: d[l.key][s] })).filter(({ v }) => Number.isFinite(v));
+        const p = previousSlot(capture, seq);
+        const ringOf = l => l.values ?? d[l.key];
+        const entries = drawn.lines.map(l => ({ l, v: ringOf(l)[s] })).filter(({ v }) => Number.isFinite(v));
         entries.sort((a, b) => b.v - a.v);
         /** @type {PerfHoverLine[]} */
         const lines = [{ text: capture.label(seq) }];
         for (const { l, v } of entries) {
-            const delta = p >= 0 ? v - d[l.key][p] : 0;
+            const delta = p >= 0 ? v - ringOf(l)[p] : 0;
             const change = Number.isFinite(delta) && delta !== 0 ? ` (${delta > 0 ? '+' : '−'}${drawn.format(Math.abs(delta))})` : '';
             const hidden = this.hidden.has(`${section}:${l.key}`) ? ', hidden' : '';
             lines.push({ text: `${l.name} ${drawn.format(v)}${change}${hidden}`, color: l.color, indent: true });

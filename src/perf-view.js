@@ -1,7 +1,7 @@
 import { formatBytes, makeSection } from './model.js';
 import { SCRIPT_CALLS, SCRIPT_STRIDE } from './perf-capture.js';
 
-/** @import { PerfCapture, PerfGpuPass, PerfLoad } from './perf-capture.js' */
+/** @import { PerfCapture, PerfEvent, PerfGpuPass, PerfLoad } from './perf-capture.js' */
 /** @import { Described } from './describe.js' */
 /** @import { PropertyRow, PropertySection } from './model.js' */
 
@@ -86,7 +86,7 @@ const CPU_PARTS = [
  * @type {[string, string][]}
  */
 const RENDER_PHASES = [
-    ['cull', 'Culling'], ['sort', 'Sorting'], ['skin', 'Skinning'], ['morph', 'Morphing'],
+    ['batching', 'Batching'], ['cull', 'Culling'], ['sort', 'Sorting'], ['skin', 'Skinning'], ['morph', 'Morphing'],
     ['shadows', 'Shadow maps'], ['forward', 'Forward'], ['clusters', 'Light clusters']
 ];
 
@@ -124,6 +124,13 @@ const EVENT_KINDS = [
             'browsers report them (long animation frames). It says why a frame was slow rather than whether it was: a shorter ' +
             'stall is not reported, and in an app slower than 50 ms a frame can be marked without being a hitch. It covers the ' +
             'work between frames too, as while loading'
+    },
+    {
+        key: 'bake',
+        name: 'Lightmap bakes',
+        short: 'Lightmaps',
+        color: '#bf5af2',
+        tip: 'Lightmaps the app baked with the lightmapper, which blocks the frame it runs in, with how many it baked in how many passes, and the render targets and shaders it made. Reported by the profiler and debug engines'
     },
     { key: 'compile', name: 'Shaders', color: '#ff9500', tip: 'Shaders compiled or created, and render pipelines created' },
     { key: 'gc', name: 'Heap shrank', color: '#ffcc00', tip: 'The JavaScript heap shrank: a garbage collection' },
@@ -257,17 +264,28 @@ function formatCount(value) {
 }
 
 /**
+ * @param {number} value - A value the app counts, of a unit of its own.
+ * @returns {string} The value: a whole number as a count, others to a few digits.
+ */
+function formatValue(value) {
+    if (!Number.isFinite(value)) return '–';
+    if (Number.isInteger(value)) return formatCount(value);
+    const size = Math.abs(value);
+    return value.toFixed(size >= 100 ? 0 : size >= 10 ? 1 : size >= 1 ? 2 : 3);
+}
+
+/**
  * Sorts the finite values of a channel over a span of frames into the scratch buffer, sampling the
  * span evenly when it holds more frames than the buffer.
  *
  * @param {PerfCapture} capture - The capture.
- * @param {string} key - The channel.
+ * @param {string|Float64Array} key - The channel, or a ring of values like one.
  * @param {number} from - The first frame.
  * @param {number} to - The last frame, inclusive.
  * @returns {Float64Array} The sorted values, a view of the scratch buffer valid until the next call.
  */
 function sortedValues(capture, key, from, to) {
-    const data = capture.data[key];
+    const data = typeof key === 'string' ? capture.data[key] : key;
     const span = to - from + 1;
     const step = Math.max(1, span / SCRATCH.length);
     let n = 0;
@@ -298,13 +316,13 @@ function callCount(n) {
 
 /**
  * @param {PerfCapture} capture - The capture.
- * @param {string} key - The channel.
+ * @param {string|Float64Array} key - The channel, or a ring of values like one.
  * @param {number} from - The first frame.
  * @param {number} to - The last frame, inclusive.
  * @returns {PerfRangeStats} Its mean, 95th percentile and largest over the frames.
  */
 function rangeStats(capture, key, from, to) {
-    const data = capture.data[key];
+    const data = typeof key === 'string' ? capture.data[key] : key;
     let count = 0;
     let sum = 0;
     let max = -Infinity;
@@ -419,6 +437,16 @@ function isHitch(capture, seq, median) {
 
 /**
  * @param {PerfCapture} capture - The capture.
+ * @param {number} seq - A kept entry.
+ * @returns {number} The slot of the frame before it, or -1 where none is kept, or where the entry
+ * before it is the start of the app, which has no figures of a frame to compare with.
+ */
+function previousSlot(capture, seq) {
+    return capture.has(seq - 1) && !capture.isStartup(seq - 1) ? capture.slot(seq - 1) : -1;
+}
+
+/**
+ * @param {PerfCapture} capture - The capture.
  * @param {number} seq - A kept frame.
  * @returns {number} The kinds of event the frame had, a bit per kind of {@link EVENT_KINDS} in
  * its order.
@@ -426,13 +454,13 @@ function isHitch(capture, seq, median) {
 function eventMask(capture, seq) {
     const d = capture.data;
     const s = capture.slot(seq);
-    const p = capture.has(seq - 1) ? capture.slot(seq - 1) : -1;
+    const p = previousSlot(capture, seq);
     // called for every frame on every redraw of the charts, so it is kept free of garbage
     let mask = isHitch(capture, seq, captureNorms(capture).median) ? EVENT_BITS.hitch : 0;
     const events = capture.events(seq);
     for (let i = 0; i < events.length; i++) {
         const kind = events[i].kind;
-        mask |= kind === 'long' ? EVENT_BITS.long : EVENT_BITS.marker;
+        mask |= kind === 'long' ? EVENT_BITS.long : kind === 'bake' ? EVENT_BITS.bake : EVENT_BITS.marker;
     }
     if (p < 0) return mask | (d.compiles[s] > 0 ? EVENT_BITS.compile : 0);
     if (d.compiles[s] > 0 || d.shaders[s] > d.shaders[p] || d.pipelines[s] > d.pipelines[p]) mask |= EVENT_BITS.compile;
@@ -448,6 +476,20 @@ function eventMask(capture, seq) {
 }
 
 /**
+ * @param {PerfEvent} event - A bake of lightmaps.
+ * @returns {string[]} How long it took and how many it baked, then the render targets and
+ * shaders it made.
+ */
+function bakeLines(event) {
+    const bake = event.bake;
+    if (!bake) return [`${formatMs(event.duration)} baking lightmaps`];
+    return [
+        `${formatMs(event.duration)} baking ${formatCount(bake.lightmaps)} ${bake.lightmaps === 1 ? 'lightmap' : 'lightmaps'} in ${formatCount(bake.passes)} passes`,
+        `render targets created in ${formatMs(bake.targets)} · ${formatCount(bake.shaders)} shaders linked in ${formatMs(bake.compile)}`
+    ];
+}
+
+/**
  * @param {PerfCapture} capture - The capture.
  * @param {number} seq - A kept frame.
  * @param {string} kind - The key of one of the {@link EVENT_KINDS}.
@@ -456,7 +498,7 @@ function eventMask(capture, seq) {
 function eventLines(capture, seq, kind) {
     const d = capture.data;
     const s = capture.slot(seq);
-    const p = capture.has(seq - 1) ? capture.slot(seq - 1) : -1;
+    const p = previousSlot(capture, seq);
     const at = start => `at +${formatMs(start - d.tick[s])}`;
     const lines = [];
     const change = (key, name) => {
@@ -483,6 +525,11 @@ function eventLines(capture, seq, kind) {
                 if (event.kind !== 'long') continue;
                 lines.push(`${formatMs(event.duration)} busy, longest script ${event.name}`);
                 if (event.detail) lines.push(event.detail);
+            }
+            break;
+        case 'bake':
+            for (const event of capture.events(seq)) {
+                if (event.kind === 'bake') lines.push(...bakeLines(event));
             }
             break;
         case 'compile':
@@ -517,6 +564,7 @@ function eventUnsupported(capture, kind) {
     if (kind === 'long' && !capture.supports.longFrames) return 'This browser does not report when its main thread is blocked: Chromium browsers do';
     if (kind === 'marker' && !capture.supports.measures) return 'This browser does not report measures';
     if (kind === 'gc' && !capture.supports.heap) return 'Only Chromium browsers report the size of the JavaScript heap';
+    if (kind === 'bake' && !capture.detailed) return 'Lightmap bakes are reported by the profiler and debug engines';
     return '';
 }
 
@@ -735,6 +783,11 @@ function startupSections(capture, seq) {
     } else if (!capture.detailed) {
         startup.rows.push({ key: 'compiles', label: 'Shader compiles', value: note('counted by the profiler and debug engines') });
     }
+    const bakes = capture.events(seq).filter(event => event.kind === 'bake');
+    if (bakes.length) {
+        const time = bakes.reduce((sum, event) => sum + event.duration, 0);
+        startup.rows.push({ key: 'bakes', label: 'Lightmap bakes', value: value(`${formatCount(bakes.length)} · ${formatMs(time)}`, 'num', time) });
+    }
     sections.push(startup);
 
     if (milestones.length) {
@@ -819,7 +872,7 @@ function buildPerfModel(selection) {
 
     const d = capture.data;
     const s = capture.slot(seq);
-    const before = capture.has(seq - 1) ? capture.slot(seq - 1) : -1;
+    const before = previousSlot(capture, seq);
     const prev = key => (before >= 0 ? d[key][before] : NaN);
     const interval = d.interval[s];
     const { budget, median } = captureNorms(capture);
@@ -851,7 +904,17 @@ function buildPerfModel(selection) {
     }
     row('render', 'Render', d.render[s], 0, part('render').color);
     if (capture.detailed) {
-        for (const [key, label] of RENDER_PHASES) row(key, label, d[key][s], 1);
+        for (const [key, label] of RENDER_PHASES) {
+            // the batching only with a batcher, with the batches it created apart
+            if (key === 'batching') {
+                if (!Number.isFinite(d.batching[s])) continue;
+                const described = timing(d.batching[s], interval);
+                if (d.batchCreate[s] > 0) described.text += ` · creating batches ${formatMs(d.batchCreate[s])}`;
+                cpu.rows.push({ key, label, value: described, depth: 1 });
+                continue;
+            }
+            row(key, label, d[key][s], 1);
+        }
     } else {
         cpu.rows.push({ key: 'phases', label: 'Phases', value: note('timed by the profiler and debug engines'), depth: 1 });
     }
@@ -861,6 +924,8 @@ function buildPerfModel(selection) {
     }
     sections.push(cpu);
     if (capture.supports.scripts) sections.push(scriptsSection(selection));
+    const counters = countersSection(selection);
+    if (counters) sections.push(counters);
     const loading = loadingSection(capture, seq);
     if (loading) sections.push(loading);
 
@@ -971,6 +1036,39 @@ function buildPerfModel(selection) {
     sections.push(events);
 
     return sections;
+}
+
+/**
+ * The counters the app keeps in `app.stats.user`, as the frame shown left them, or over the
+ * frames selected together their mean, 95th percentile and largest.
+ *
+ * @param {PerfSelection} selection - The selection.
+ * @returns {PropertySection|null} The section, or null where the app set none of them.
+ */
+function countersSection(selection) {
+    const { capture, seq, range } = selection;
+    const names = capture.counterNames;
+    if (!names.length) return null;
+    const from = range ? Math.max(capture.first, range.from) : seq;
+    const to = range ? Math.min(capture.end - 1, range.to) : seq;
+    const section = makeSection('counters', range ? `Counters, ${capture.rangeLabel(from, to).toLowerCase()}` : 'Counters');
+    names.forEach((name, id) => {
+        const ring = capture.counterRings[id];
+        /** @type {Described} */
+        let described;
+        if (range) {
+            const stat = rangeStats(capture, ring, from, to);
+            if (!stat.count) return;
+            described = { text: `avg ${formatValue(stat.avg)} · p95 ${formatValue(stat.p95)} · max ${formatValue(stat.max)}`, cls: 'num', raw: stat };
+        } else {
+            const v = ring[capture.slot(seq)];
+            if (!Number.isFinite(v)) return;
+            described = value(formatValue(v), 'num', v);
+        }
+        described.swatch = scriptColorAt(id);
+        section.rows.push({ key: `counter:${name}`, label: name, value: described });
+    });
+    return section.rows.length ? section : null;
 }
 
 /**
@@ -1121,6 +1219,6 @@ function gpuNote(gpu) {
 export {
     ASSET_COLOR, ASSET_COLORS, ASSET_KINDS, CPU_PARTS, EVENT_KINDS, FAILED_COLOR, HITCH_FACTOR, MAIN_THREAD_COLOR, MILESTONE_COLOR, OTHER_SCRIPTS_COLOR,
     RENDER_PHASES, REQUEST_COLOR, SCRIPT_COLORS, SCRIPT_ROWS, buildPerfModel, callCount, captureNorms, effectName, eventLines,
-    formatDuration, eventMask, eventUnsupported, formatCount, formatMs, frameVerdict, isHitch, loadColor, loadText, rangeStats,
+    formatDuration, eventMask, eventUnsupported, formatCount, formatMs, formatValue, frameVerdict, isHitch, loadColor, loadText, previousSlot, rangeStats,
     scriptColorAt, scriptLegend
 };

@@ -33,7 +33,7 @@ const SERIES = {
 
 // the render phases a profiler or debug engine times, by the name they are copied under
 const RENDER_PHASES = [
-    ['culling', 'cull'], ['sorting', 'sort'], ['skinning', 'skin'], ['morphing', 'morph'],
+    ['batching', 'batching'], ['creatingBatches', 'batchCreate'], ['culling', 'cull'], ['sorting', 'sort'], ['skinning', 'skin'], ['morphing', 'morph'],
     ['shadowMaps', 'shadows'], ['forward', 'forward'], ['lightClusters', 'clusters']
 ];
 
@@ -99,6 +99,22 @@ function loadJson(load, tick) {
 }
 
 /**
+ * @param {PerfCapture} capture - The capture.
+ * @param {number} slot - The slot of a frame.
+ * @returns {Record<string, number>|null} The counters the app set in the frame, by name, or null
+ * where it set none.
+ */
+function countersOf(capture, slot) {
+    /** @type {Record<string, number>|null} */
+    let counters = null;
+    capture.counterNames.forEach((name, id) => {
+        const v = capture.counterRings[id][slot];
+        if (Number.isFinite(v)) (counters ??= {})[name] = v;
+    });
+    return counters;
+}
+
+/**
  * Everything recorded for a frame. Durations are in milliseconds, memory in bytes; a figure the
  * engine did not provide is left out.
  *
@@ -146,9 +162,12 @@ function frameJson(capture, seq) {
             name: event.name,
             start: event.start - d.tick[s],
             duration: event.duration,
-            ...(event.detail ? { detail: event.detail } : {})
+            ...(event.detail ? { detail: event.detail } : {}),
+            ...(event.bake ? { bake: event.bake } : {})
         }));
     }
+    const counters = countersOf(capture, s);
+    if (counters) frame.counters = counters;
     const loads = capture.loads(seq);
     if (loads.length) frame.loads = loads.map(load => loadJson(load, d.tick[s]));
     return frame;
@@ -223,13 +242,13 @@ function captureJson(capture, from, to, device) {
 /**
  * The series of a chart or section, a row per frame: the frame and its figures. The GPU series
  * has a column per pass, the scripts series a column per script type and only the frames that
- * timed scripts, the events series lists only the frames that had events, with what happened
- * by kind, and the loading series has a row per asset, request and moment, in the frame it ended
- * in.
+ * timed scripts, the counters series a column per counter and only the frames that set one, the
+ * events series lists only the frames that had events, with what happened by kind, and the
+ * loading series has a row per asset, request and moment, in the frame it ended in.
  *
  * @param {PerfCapture} capture - The capture.
  * @param {string} key - The chart or section: 'frame', 'cpu', 'gpu', 'draws', 'scripts',
- * 'loading', 'memory', 'resources' or 'events'.
+ * 'counters', 'loading', 'memory', 'resources' or 'events'.
  * @param {number} from - The first frame.
  * @param {number} to - The last frame, inclusive.
  * @returns {object[]} The rows.
@@ -247,6 +266,11 @@ function seriesRows(capture, key, from, to) {
                 if (mask & (1 << i)) row[kind.key] = eventLines(capture, seq, kind.key);
             });
             rows.push(row);
+            continue;
+        }
+        if (key === 'counters') {
+            const counters = countersOf(capture, s);
+            if (counters) rows.push({ frame: capture.frameNumber(seq), ...counters });
             continue;
         }
         if (key === 'loading') {
