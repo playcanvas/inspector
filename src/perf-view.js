@@ -1,9 +1,9 @@
 import { formatBytes, makeSection } from './model.js';
 import { SCRIPT_CALLS, SCRIPT_STRIDE } from './perf-capture.js';
 
-/** @import { PerfCapture, PerfGpuPass } from './perf-capture.js' */
+/** @import { PerfCapture, PerfGpuPass, PerfLoad } from './perf-capture.js' */
 /** @import { Described } from './describe.js' */
-/** @import { PropertySection } from './model.js' */
+/** @import { PropertyRow, PropertySection } from './model.js' */
 
 /**
  * @typedef {object} PerfPart
@@ -95,6 +95,7 @@ const RENDER_PHASES = [
  * @ignore
  * @property {string} key - A key unique among the kinds.
  * @property {string} name - The display name.
+ * @property {string} [short] - The name beside the charts, where the display name is too long.
  * @property {string} color - The CSS color its marks are drawn in.
  * @property {string} tip - What it marks.
  */
@@ -105,12 +106,28 @@ const RENDER_PHASES = [
  * @type {PerfEventKind[]}
  */
 const EVENT_KINDS = [
-    { key: 'hitch', name: 'Hitches', color: '#ff3b30', tip: 'Frames that took over twice as long as the median frame' },
-    { key: 'long', name: 'Long frames', color: '#ff2d92', tip: 'Long animation frames the browser reported, with the scripts that ran longest' },
+    {
+        key: 'hitch',
+        name: 'Hitches',
+        color: '#ff3b30',
+        tip: 'Frames that took over twice as long as the median frame, whatever held them back: what the user sees stutter. One ' +
+            'also marked Thread blocked was held back by work on the main thread, one without it by the GPU, the browser or the ' +
+            'display. Hover a hitch to see which'
+    },
+    {
+        key: 'long',
+        name: 'Main thread blocked',
+        // what fits beside the charts
+        short: 'Thread blocked',
+        color: '#ff2d92',
+        tip: 'Frames in which the browser\'s main thread was busy for 50 ms or more, with the script that ran longest, as Chromium ' +
+            'browsers report them (long animation frames). It says why a frame was slow rather than whether it was: a shorter ' +
+            'stall is not reported, and in an app slower than 50 ms a frame can be marked without being a hitch. It covers the ' +
+            'work between frames too, as while loading'
+    },
     { key: 'compile', name: 'Shaders', color: '#ff9500', tip: 'Shaders compiled or created, and render pipelines created' },
     { key: 'gc', name: 'Heap shrank', color: '#ffcc00', tip: 'The JavaScript heap shrank: a garbage collection' },
     { key: 'resource', name: 'Resources', color: '#3d8bff', tip: 'Textures, render targets or buffers created or destroyed' },
-    { key: 'asset', name: 'Assets', color: '#4cd964', tip: 'Assets that finished loading' },
     { key: 'marker', name: 'Measures', color: '#e5e5ea', tip: 'Spans the app measured with performance.measure' }
 ];
 
@@ -129,6 +146,9 @@ const HITCH_FACTOR = 2;
 // the share of the frame interval a processor has to fill for the frame to be bound by it
 const BOUND_SHARE = 0.85;
 
+// how long the browser's main thread is busy in a frame before it reports a long animation frame
+const LONG_FRAME = 50;
+
 // room to sort the values of a channel for its percentiles in; longer spans are sampled evenly
 const SCRATCH = new Float64Array(4096);
 
@@ -136,6 +156,26 @@ const SCRATCH = new Float64Array(4096);
 // them in lighter and then darker shades. The other types share one
 const SCRIPT_COLORS = ['#ffcc00', '#ff6482', '#64d2ff', '#30d158', '#bf5af2', '#ff9f0a', '#0a84ff', '#ff453a', '#66d4cf', '#ac8e68'];
 const OTHER_SCRIPTS_COLOR = '#8e8e93';
+
+// the kinds of asset loading is drawn in a color each, by the asset types of each; red is kept
+// for the assets that failed
+const ASSET_KINDS = [
+    { name: 'Textures', color: '#ff9f0a', types: ['texture', 'textureatlas', 'cubemap'] },
+    { name: 'Models', color: '#30d158', types: ['container', 'model', 'render'] },
+    { name: 'Gaussian splats', color: '#0a84ff', types: ['gsplat'] },
+    { name: 'Scripts', color: '#bf5af2', types: ['script'] },
+    { name: 'Data', color: '#ffd60a', types: ['json', 'template', 'material'] },
+    { name: 'Animations', color: '#66d4cf', types: ['animation'] },
+    { name: 'Audio', color: '#64d2ff', types: ['audio'] },
+    { name: 'Fonts', color: '#e5e5ea', types: ['font'] },
+    { name: 'WebAssembly', color: '#ac8e68', types: ['wasm'] }
+];
+const ASSET_COLORS = Object.fromEntries(ASSET_KINDS.flatMap(kind => kind.types.map(type => [type, kind.color])));
+const ASSET_COLOR = '#8e8e93';
+const FAILED_COLOR = '#ff453a';
+const REQUEST_COLOR = '#64d2ff';
+const MAIN_THREAD_COLOR = '#ff2d92';
+const MILESTONE_COLOR = '#e5e5ea';
 
 // how many of the longest script types get a band of their own at first, and how many more each
 // Show more adds
@@ -149,6 +189,12 @@ const MAX_SCRIPT_ROWS = 40;
 
 // a clock coarser than this, in milliseconds, makes the times of single script calls noisy
 const COARSE_CLOCK = 0.02;
+
+// the slowest assets and the longest tasks of the main thread the start of the app lists, and the
+// assets and the requests a frame lists of each
+const STARTUP_ASSETS = 10;
+const STARTUP_BLOCKS = 5;
+const FRAME_LOADS = 20;
 
 /**
  * The norms of each capture, kept until it records more.
@@ -165,6 +211,15 @@ const normsCache = new WeakMap();
  * @type {WeakMap<PerfCapture, { key: string, legend: PerfScriptLegend }>}
  */
 const legendCache = new WeakMap();
+
+/**
+ * @param {number} ms - A duration in milliseconds, which can be long.
+ * @returns {string} The duration in milliseconds below a second, in seconds above.
+ */
+function formatDuration(ms) {
+    if (!Number.isFinite(ms)) return '–';
+    return ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
+}
 
 /**
  * @param {number} ms - A duration in milliseconds.
@@ -377,7 +432,7 @@ function eventMask(capture, seq) {
     const events = capture.events(seq);
     for (let i = 0; i < events.length; i++) {
         const kind = events[i].kind;
-        mask |= kind === 'long' ? EVENT_BITS.long : kind === 'asset' ? EVENT_BITS.asset : EVENT_BITS.marker;
+        mask |= kind === 'long' ? EVENT_BITS.long : EVENT_BITS.marker;
     }
     if (p < 0) return mask | (d.compiles[s] > 0 ? EVENT_BITS.compile : 0);
     if (d.compiles[s] > 0 || d.shaders[s] > d.shaders[p] || d.pipelines[s] > d.pipelines[p]) mask |= EVENT_BITS.compile;
@@ -412,13 +467,21 @@ function eventLines(capture, seq, kind) {
     switch (kind) {
         case 'hitch': {
             const { median } = captureNorms(capture);
-            if (isHitch(capture, seq, median)) lines.push(`${formatMs(d.interval[s])}, ${(d.interval[s] / median).toFixed(1)}× the median frame of ${formatMs(median)}`);
+            if (!isHitch(capture, seq, median)) break;
+            lines.push(`${formatMs(d.interval[s])}, ${(d.interval[s] / median).toFixed(1)}× the median frame of ${formatMs(median)}`);
+            // whether the main thread held it back, where the browser can tell
+            const blocked = capture.events(seq).find(event => event.kind === 'long');
+            if (blocked) {
+                lines.push(`Main thread blocked ${formatMs(blocked.duration)}, longest script ${blocked.name}`);
+            } else if (capture.supports.longFrames && d.interval[s] >= LONG_FRAME) {
+                lines.push('Main thread not blocked: the GPU, the browser or the display held it back');
+            }
             break;
         }
         case 'long':
             for (const event of capture.events(seq)) {
                 if (event.kind !== 'long') continue;
-                lines.push(`${formatMs(event.duration)} long animation frame, longest script ${event.name}`);
+                lines.push(`${formatMs(event.duration)} busy, longest script ${event.name}`);
                 if (event.detail) lines.push(event.detail);
             }
             break;
@@ -434,11 +497,6 @@ function eventLines(capture, seq, kind) {
             break;
         case 'resource':
             for (const [key, name] of RESOURCE_KINDS) change(key, name);
-            break;
-        case 'asset':
-            for (const event of capture.events(seq)) {
-                if (event.kind === 'asset') lines.push(`${event.name} loaded ${at(event.start)}`);
-            }
             break;
         case 'marker':
             for (const event of capture.events(seq)) {
@@ -456,7 +514,7 @@ function eventLines(capture, seq, kind) {
  * when it can.
  */
 function eventUnsupported(capture, kind) {
-    if (kind === 'long' && !capture.supports.longFrames) return 'This browser does not report long animation frames';
+    if (kind === 'long' && !capture.supports.longFrames) return 'This browser does not report when its main thread is blocked: Chromium browsers do';
     if (kind === 'marker' && !capture.supports.measures) return 'This browser does not report measures';
     if (kind === 'gc' && !capture.supports.heap) return 'Only Chromium browsers report the size of the JavaScript heap';
     return '';
@@ -529,6 +587,35 @@ function countChange(now, before) {
 }
 
 /**
+ * @param {PerfLoad} load - A load.
+ * @returns {string} What it was: an asset or a request with how long it took, its request and
+ * its size, or a moment with when it was.
+ */
+function loadText(load) {
+    if (load.kind === 'milestone') return `${load.name} at ${formatDuration(load.start)}`;
+    const took = Number.isFinite(load.start) ? formatMs(load.end - load.start) : 'began before recording';
+    // the type first, so the color is never all that tells it
+    const parts = [load.kind === 'asset' && load.type ? `${load.name} · ${load.type} · ${took}` : `${load.name} ${took}`];
+    if (load.failed) parts.push('failed');
+    if (load.kind === 'asset' && Number.isFinite(load.netEnd)) parts.push(`request ${formatMs(load.netEnd - load.netStart)}`);
+    if (load.kind === 'request' && Number.isFinite(load.firstByte) && load.firstByte > 0) parts.push(`first byte after ${formatMs(load.firstByte - load.netStart)}`);
+    if (load.bytes > 0) parts.push(`${formatBytes(load.bytes)}${load.cached ? ', cached' : ''}`);
+    else if (load.cached) parts.push('cached');
+    return parts.join(' · ');
+}
+
+/**
+ * @param {PerfLoad} load - A load.
+ * @returns {string} The color it is drawn in.
+ */
+function loadColor(load) {
+    if (load.failed) return FAILED_COLOR;
+    if (load.kind === 'asset') return ASSET_COLORS[load.type] ?? ASSET_COLOR;
+    if (load.kind === 'request') return REQUEST_COLOR;
+    return MILESTONE_COLOR;
+}
+
+/**
  * @param {PerfSelection} selection - The selection.
  * @returns {PropertySection} The figures of the selected range of frames.
  */
@@ -536,7 +623,7 @@ function rangeSection(selection) {
     const { capture, range } = selection;
     const from = Math.max(capture.first, range.from);
     const to = Math.min(capture.end - 1, range.to);
-    const section = makeSection('range', `Frames ${from + 1}–${to + 1}`);
+    const section = makeSection('range', capture.rangeLabel(from, to));
     const interval = rangeStats(capture, 'interval', from, to);
     const { median } = captureNorms(capture);
     let hitches = 0;
@@ -561,6 +648,160 @@ function rangeSection(selection) {
 }
 
 /**
+ * @param {PerfLoad} load - An asset, or a request.
+ * @returns {number} How long it took; NaN for an asset that began loading before recording did.
+ */
+function loadTime(load) {
+    return load.end - load.start;
+}
+
+/**
+ * @param {PerfLoad} load - An asset, or a request.
+ * @param {number} depth - How deep its row is.
+ * @returns {PropertyRow} Its row: what it was, how long it took, for an asset its request and the
+ * processing after it, and its size.
+ */
+function loadRow(load, depth) {
+    const took = loadTime(load);
+    const parts = [Number.isFinite(took) ? formatMs(took) : 'began before recording'];
+    if (load.kind === 'asset' && load.type) parts.unshift(load.type);
+    if (load.failed) parts.push('failed');
+    if (load.kind === 'asset' && Number.isFinite(load.netEnd)) {
+        parts.push(`request ${formatMs(load.netEnd - load.netStart)}`);
+        if (Number.isFinite(load.start)) parts.push(`processing ${formatMs(Math.max(0, load.end - load.netEnd))}`);
+    }
+    if (load.kind === 'request' && load.firstByte > 0) parts.push(`first byte after ${formatMs(load.firstByte - load.netStart)}`);
+    if (load.bytes > 0) parts.push(`${formatBytes(load.bytes)}${load.cached ? ', cached' : ''}`);
+    else if (load.cached) parts.push('cached');
+    const described = value(parts.join(' · '), load.failed ? 'err' : 'num', Number.isFinite(took) ? took : undefined);
+    described.swatch = loadColor(load);
+    return { key: `${load.kind}:${load.id ?? load.url ?? load.name}:${load.start}`, label: load.name, value: described, depth };
+}
+
+/**
+ * @param {readonly PerfLoad[]} loads - What loaded in an entry.
+ * @returns {{ assets: PerfLoad[], requests: PerfLoad[], milestones: PerfLoad[] }} Its assets and
+ * its requests, the longest first, and its moments in their order.
+ */
+function splitLoads(loads) {
+    const byTime = (a, b) => (loadTime(b) || 0) - (loadTime(a) || 0);
+    return {
+        assets: loads.filter(load => load.kind === 'asset').sort(byTime),
+        requests: loads.filter(load => load.kind === 'request').sort(byTime),
+        milestones: loads.filter(load => load.kind === 'milestone').sort((a, b) => a.start - b.start)
+    };
+}
+
+/**
+ * @param {PerfLoad[]} requests - Requests.
+ * @returns {Described} How many there were, their size and how many came from the cache.
+ */
+function requestSummary(requests) {
+    const bytes = requests.reduce((sum, request) => sum + (request.bytes || 0), 0);
+    const cached = requests.filter(request => request.cached).length;
+    return value(`${formatCount(requests.length)} · ${formatBytes(bytes)}${cached ? ` · ${formatCount(cached)} from the cache` : ''}`, 'num', requests.length);
+}
+
+/**
+ * The start of the app, from the page opening to its first frame: how long it took, what the page
+ * requested and the assets it loaded, its moments, the slowest assets and the longest tasks of the
+ * main thread.
+ *
+ * @param {PerfCapture} capture - The capture.
+ * @param {number} seq - The entry of the start of the app.
+ * @returns {PropertySection[]} The sections.
+ */
+function startupSections(capture, seq) {
+    const d = capture.data;
+    const s = capture.slot(seq);
+    const length = d.width[s];
+    const { assets, requests, milestones } = splitLoads(capture.loads(seq));
+    /** @type {PropertySection[]} */
+    const sections = [];
+
+    const startup = makeSection('frame', 'Startup');
+    startup.rows.push({ key: 'length', label: 'First frame', value: value(`${formatDuration(length)} after the page opened`, 'num', length) });
+    startup.rows.push({ key: 'requests', label: 'Requests', value: requestSummary(requests) });
+    const failed = assets.filter(asset => asset.failed).length;
+    const loading = capture.pendingLoads().filter(load => load.start < length).length;
+    const parts = [`${formatCount(assets.length - failed)} loaded`];
+    if (failed) parts.push(`${formatCount(failed)} failed`);
+    if (loading) parts.push(`${formatCount(loading)} still loading`);
+    startup.rows.push({ key: 'assets', label: 'Assets', value: value(parts.join(' · '), failed ? 'err' : 'num', assets.length) });
+    if (d.compiles[s] > 0) {
+        // WebGL compiles lazily, so the device may give no time for them
+        const time = d.compileTime[s] > 0 ? ` · ${formatMs(d.compileTime[s])}` : '';
+        startup.rows.push({ key: 'compiles', label: 'Shader compiles', value: value(`${formatCount(d.compiles[s])}${time}`, 'num', d.compiles[s]) });
+    } else if (!capture.detailed) {
+        startup.rows.push({ key: 'compiles', label: 'Shader compiles', value: note('counted by the profiler and debug engines') });
+    }
+    sections.push(startup);
+
+    if (milestones.length) {
+        const moments = makeSection('milestones', 'Milestones');
+        for (const load of milestones) {
+            const described = value(formatDuration(load.start), 'num', load.start);
+            described.swatch = loadColor(load);
+            moments.rows.push({ key: `milestone:${load.name}`, label: load.name, value: described });
+        }
+        sections.push(moments);
+    }
+
+    const timed = assets.filter(asset => Number.isFinite(loadTime(asset)));
+    if (timed.length) {
+        const slowest = makeSection('assets', 'Slowest assets');
+        for (const load of timed.slice(0, STARTUP_ASSETS)) slowest.rows.push(loadRow(load, 0));
+        if (timed.length > STARTUP_ASSETS) slowest.rows.push({ key: 'more', label: '', value: note(`and ${timed.length - STARTUP_ASSETS} more`) });
+        sections.push(slowest);
+    }
+
+    const blocks = capture.events(seq).filter(event => event.kind === 'long').sort((a, b) => b.duration - a.duration);
+    if (blocks.length) {
+        const main = makeSection('main', 'Main thread blocked');
+        for (const [n, event] of blocks.slice(0, STARTUP_BLOCKS).entries()) {
+            const described = value(`${formatMs(event.duration)} · longest script ${event.name}${event.detail ? ` · ${event.detail}` : ''}`, 'num', event.duration);
+            described.swatch = MAIN_THREAD_COLOR;
+            main.rows.push({ key: `long:${n}`, label: `At ${formatDuration(event.start)}`, value: described });
+        }
+        if (blocks.length > STARTUP_BLOCKS) main.rows.push({ key: 'more', label: '', value: note(`and ${blocks.length - STARTUP_BLOCKS} more`) });
+        sections.push(main);
+    }
+    return sections;
+}
+
+/**
+ * What loaded during a frame: its moments, the assets that finished and the requests that ended.
+ *
+ * @param {PerfCapture} capture - The capture.
+ * @param {number} seq - The frame.
+ * @returns {PropertySection|null} The section, or null when nothing loaded.
+ */
+function loadingSection(capture, seq) {
+    const loads = capture.loads(seq);
+    if (!loads.length) return null;
+    const { assets, requests, milestones } = splitLoads(loads);
+    const section = makeSection('loading', 'Loading');
+    const tick = capture.data.tick[capture.slot(seq)];
+    for (const load of milestones) {
+        const described = value(`at +${formatMs(load.start - tick)}`, 'num', load.start);
+        described.swatch = loadColor(load);
+        section.rows.push({ key: `milestone:${load.name}`, label: load.name, value: described });
+    }
+    if (assets.length) {
+        const failed = assets.filter(asset => asset.failed).length;
+        section.rows.push({ key: 'assets', label: 'Assets', value: value(`${formatCount(assets.length)} finished${failed ? ` · ${formatCount(failed)} failed` : ''}`, failed ? 'err' : 'num', assets.length) });
+        for (const load of assets.slice(0, FRAME_LOADS)) section.rows.push(loadRow(load, 1));
+        if (assets.length > FRAME_LOADS) section.rows.push({ key: 'moreAssets', label: '', value: note(`and ${assets.length - FRAME_LOADS} more`), depth: 1 });
+    }
+    if (requests.length) {
+        section.rows.push({ key: 'requests', label: 'Requests', value: requestSummary(requests) });
+        for (const load of requests.slice(0, FRAME_LOADS)) section.rows.push(loadRow(load, 1));
+        if (requests.length > FRAME_LOADS) section.rows.push({ key: 'moreRequests', label: '', value: note(`and ${requests.length - FRAME_LOADS} more`), depth: 1 });
+    }
+    return section;
+}
+
+/**
  * Builds the property view sections for the frames selected in a capture: the range, when frames
  * are selected together, then everything recorded for the frame shown.
  *
@@ -573,6 +814,8 @@ function buildPerfModel(selection) {
     const sections = [];
     if (selection.range) sections.push(rangeSection(selection));
     if (!capture.has(seq)) return sections;
+    // the start of the app ran no frame: it has what loaded instead
+    if (capture.isStartup(seq)) return sections.concat(startupSections(capture, seq));
 
     const d = capture.data;
     const s = capture.slot(seq);
@@ -581,7 +824,7 @@ function buildPerfModel(selection) {
     const interval = d.interval[s];
     const { budget, median } = captureNorms(capture);
 
-    const frame = makeSection('frame', `Frame ${seq + 1}`);
+    const frame = makeSection('frame', capture.label(seq));
     const fps = interval > 0 ? ` · ${(1000 / interval).toFixed(1)} fps` : '';
     frame.rows.push({ key: 'interval', label: 'Frame interval', value: value(`${formatMs(interval)}${fps}`, 'num', interval) });
     if (isHitch(capture, seq, median)) {
@@ -618,6 +861,8 @@ function buildPerfModel(selection) {
     }
     sections.push(cpu);
     if (capture.supports.scripts) sections.push(scriptsSection(selection));
+    const loading = loadingSection(capture, seq);
+    if (loading) sections.push(loading);
 
     const gpuSection = makeSection('gpu', 'GPU');
     const passes = capture.passesInOrder(seq);
@@ -739,7 +984,7 @@ function scriptsSection(selection) {
     const { capture, seq, range } = selection;
     const from = range ? Math.max(capture.first, range.from) : seq;
     const to = range ? Math.min(capture.end - 1, range.to) : seq;
-    const section = makeSection('scripts', range ? `Scripts, frames ${from + 1}–${to + 1}` : 'Scripts');
+    const section = makeSection('scripts', range ? `Scripts, ${capture.rangeLabel(from, to).toLowerCase()}` : 'Scripts');
     const d = capture.data;
     let timed = 0;
     for (let f = from; f <= to; f++) {
@@ -874,7 +1119,8 @@ function gpuNote(gpu) {
 }
 
 export {
-    CPU_PARTS, EVENT_KINDS, HITCH_FACTOR, OTHER_SCRIPTS_COLOR, RENDER_PHASES, SCRIPT_COLORS, SCRIPT_ROWS, buildPerfModel, callCount,
-    captureNorms, effectName, eventLines, eventMask, eventUnsupported, formatCount, formatMs, frameVerdict, isHitch,
-    rangeStats, scriptColorAt, scriptLegend
+    ASSET_COLOR, ASSET_COLORS, ASSET_KINDS, CPU_PARTS, EVENT_KINDS, FAILED_COLOR, HITCH_FACTOR, MAIN_THREAD_COLOR, MILESTONE_COLOR, OTHER_SCRIPTS_COLOR,
+    RENDER_PHASES, REQUEST_COLOR, SCRIPT_COLORS, SCRIPT_ROWS, buildPerfModel, callCount, captureNorms, effectName, eventLines,
+    formatDuration, eventMask, eventUnsupported, formatCount, formatMs, frameVerdict, isHitch, loadColor, loadText, rangeStats,
+    scriptColorAt, scriptLegend
 };

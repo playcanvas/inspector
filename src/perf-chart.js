@@ -1,11 +1,12 @@
 import { formatBytes } from './model.js';
 import { SCRIPT_CALLS, SCRIPT_ORDER, SCRIPT_STRIDE } from './perf-capture.js';
 import {
-    CPU_PARTS, EVENT_KINDS, HITCH_FACTOR, OTHER_SCRIPTS_COLOR, RENDER_PHASES, SCRIPT_ROWS, callCount, captureNorms, effectName,
-    eventLines, eventMask, eventUnsupported, formatCount, formatMs, scriptLegend
+    ASSET_COLOR, ASSET_COLORS, ASSET_KINDS, CPU_PARTS, EVENT_KINDS, FAILED_COLOR, HITCH_FACTOR, MILESTONE_COLOR, OTHER_SCRIPTS_COLOR,
+    RENDER_PHASES, REQUEST_COLOR, SCRIPT_ROWS, callCount, captureNorms, effectName, eventLines, eventMask, eventUnsupported, formatCount,
+    formatDuration, formatMs, loadColor, loadText, scriptLegend
 } from './perf-view.js';
 
-/** @import { PerfCapture } from './perf-capture.js' */
+/** @import { PerfCapture, PerfLoad } from './perf-capture.js' */
 /** @import { PerfPart, PerfScriptLegend } from './perf-view.js' */
 
 /**
@@ -96,6 +97,7 @@ import {
  * @property {number} [index] - Which line of that list it is, -1 for a row that is not one.
  * @property {'more'|'fewer'} [control] - The row of the Scripts list it is that shows more script
  * types, or fewer.
+ * @property {string} [loading] - The row of the Loading section it is.
  * @property {number} [kind] - The index of the kind of event it marks, into {@link EVENT_KINDS}.
  * @property {string} [section] - The section it is the title of: 'memory', 'resources', 'events'
  * or the key of a collapsed chart.
@@ -111,6 +113,7 @@ import {
  * @property {boolean} [strong] - Whether it is what the pointer is over, among the lines.
  * @property {boolean} [nested] - Whether it is a part of the indented line above, as a script type
  * among the other scripts.
+ * @property {boolean} [muted] - Whether it says about the lines rather than being one of them.
  */
 
 /**
@@ -131,6 +134,10 @@ import {
  * @property {number} [script] - The script type it is, by its index into the names of the capture.
  * @property {PerfPassLink} [pass] - The pass of the frame graph it is, which a click shows on the
  * Frame graph tab.
+ * @property {number} [asset] - The id of the asset it is the loading of, which a click shows on the
+ * Assets tab.
+ * @property {number} [labelEnd] - Where its label stops, in milliseconds into the frame: where the
+ * next bar of its lane begins.
  * @property {number} [run] - How many passes of its name follow on in a row from it, it among
  * them, which share one label; 0 for one inside such a run.
  * @property {number} [runDuration] - Their time together.
@@ -171,6 +178,7 @@ import {
  * @property {number} [script] - The script type it is, which a click shows on the Scripts tab.
  * @property {PerfPassLink} [pass] - The pass of the frame graph it is, which a click shows on the
  * Frame graph tab.
+ * @property {number} [asset] - The id of the asset it is the loading of.
  * @property {PerfScriptType[]} [children] - What it is made of.
  */
 
@@ -272,14 +280,15 @@ const PASS_COLORS = ['#bf5af2', '#0a84ff', '#30d158', '#ff9f0a', '#ff375f', '#64
 // the color of the update in the frame timeline, under its parts
 const UPDATE_COLOR = '#2f6fdb';
 
-// the fewest frames the charts spread over, so a short capture does not draw as a few wide bars
-const MIN_SPAN = 300;
+// the shortest time the charts spread over, in milliseconds, so a short capture does not draw as a
+// few wide bars
+const MIN_SPAN = 5000;
 
 // the shortest part of a frame, in milliseconds, the timeline zooms in to
 const MIN_TIME_SPAN = 0.05;
 
-// the fewest frames the charts zoom in to
-const MIN_ZOOM = 20;
+// the shortest time the charts zoom in to, in milliseconds
+const MIN_ZOOM = 250;
 
 // how far above the 95th percentile of its columns a chart scales to: beyond that a spike is cut
 // off, marked along the top, rather than flattening everything else
@@ -294,6 +303,9 @@ const REDRAW_INTERVAL = 250;
 // the most bars of a row of the frame timeline its hover box lists
 const TIMELINE_HOVER_BARS = 12;
 
+// the longest line of a hover box that keeps to one line, in characters
+const HOVER_LINE_CHARS = 52;
+
 // the most script types and GPU passes a hover box lists: the script types of the timeline and
 // those among the other scripts of the Scripts chart, and the GPU passes and effects of the timeline
 const HOVER_SCRIPT_TYPES = 20;
@@ -302,7 +314,13 @@ const HOVER_SCRIPT_TYPES = 20;
 const HOVER_FRAMES = 3;
 
 // the width of the names to the left of the charts and the timeline
-const GUTTER = 96;
+const GUTTER = 108;
+// the least and the most the user can make it, and the least of the plot it leaves
+const MIN_GUTTER = 70;
+const MAX_GUTTER = 320;
+const MIN_PLOT = 160;
+// how far either side of the edge of the plot a press takes the divider beside the names
+const DIVIDER_REACH = 4;
 
 const CHART_GAP = 3;
 // the least height of a chart: below it, the charts area scrolls rather than squeeze them further
@@ -316,6 +334,34 @@ const NO_DASH = [];
 const NO_PARTS = /** @type {PerfPart[]} */ ([]);
 
 const SECTION_TITLE = 14;
+
+/**
+ * The rows of the Loading section, top down, with their heights and what each shows.
+ *
+ * @type {{ key: string, name: string, height: number, tip: string }[]}
+ */
+const LOADING_ROWS = [
+    { key: 'milestones', name: 'Milestones', height: 12, tip: 'Moments of the page and the app: the page arriving and loading, its first paints, the preload, the app starting and its first frame' },
+    { key: 'assets', name: 'Assets', height: 24, tip: 'Assets loading, from asking for them to their resource being ready: the request of the file solid, what came after, as parsing and uploading, faint. The color is the kind of asset' },
+    { key: 'requests', name: 'Requests', height: 14, tip: 'How many requests of the page were in flight' }
+];
+
+/**
+ * @returns {PerfHoverLine[]} The key to the colors of assets loading: each kind with its asset
+ * types, the other types, and the assets that failed.
+ */
+function assetKey() {
+    return [
+        ...ASSET_KINDS.map(kind => ({ text: `${kind.name}: ${kind.types.join(', ')}`, color: kind.color, indent: true })),
+        { text: 'Other types', color: ASSET_COLOR, indent: true },
+        { text: 'Failed', color: FAILED_COLOR, indent: true }
+    ];
+}
+
+// the rows the assets are packed into, and the height of each
+const ASSET_LANES = 3;
+const ASSET_LANE = 7;
+
 const SCRIPT_ROW = 13;
 // the fewest rows the Scripts chart is tall, for an app of few script types
 const SCRIPT_CHART_ROWS = 3;
@@ -323,6 +369,16 @@ const MEMORY_ROW = 13;
 const RESOURCE_ROW = 13;
 const EVENT_ROW = 10;
 const TIMELINE_HEIGHT = 88;
+// the space between the groups of lanes of the timeline, the CPU, the GPU, the events and what
+// loaded, with a line across it, and the height of the timeline collapsed to its title
+const TIMELINE_GROUP_GAP = 6;
+const TIMELINE_TITLE = 16;
+// the lanes of the timeline the assets and the requests of an entry are packed into, at most, and
+// how much taller the timeline is for each lane of loading
+const TIMELINE_ASSET_LANES = 4;
+const TIMELINE_REQUEST_LANES = 3;
+const LOADING_LINE = 11;
+
 // how much taller the timeline is with its line of script types, and with its line of the passes
 // of the GPU effects
 const SCRIPT_TYPES_LINE = 13;
@@ -520,6 +576,13 @@ class PerfCharts {
     onSelectScript = () => {};
 
     /**
+     * Called with the id of an asset clicked in the Loading section, to show it on the Assets tab.
+     *
+     * @type {(id: number) => void}
+     */
+    onSelectAsset = () => {};
+
+    /**
      * Called with a GPU pass or effect clicked on the timeline, to show it on the Frame graph tab.
      *
      * @type {(pass: PerfPassLink) => void}
@@ -603,6 +666,15 @@ class PerfCharts {
     _shapes = new Map();
 
     /**
+     * What the Loading section last drew, by row, for the pointer: each item across the canvas, in
+     * CSS pixels, with its lane among the assets.
+     *
+     * @type {Record<string, { x0: number, x1: number, lane: number, load: any }[]>}
+     * @private
+     */
+    _loadingDrawn = {};
+
+    /**
      * The script types the Scripts chart last drew, telling when a new selection changes them.
      *
      * @private
@@ -649,7 +721,7 @@ class PerfCharts {
      *
      * @private
      */
-    _layout = { from: 0, span: MIN_SPAN, plot: 1, bottom: 0, barWidth: 1 };
+    _layout = { from: 0, span: MIN_SPAN, plot: 1, bottom: 0 };
 
     /**
      * The height the charts and their sections were last laid out in, which is taller than their
@@ -661,12 +733,86 @@ class PerfCharts {
 
     /**
      * The press on the charts being held: where it went down, the frame there, whether it drags
-     * out a range, and the pointer it took.
+     * out a range, and the pointer it took. A press with Shift while zoomed in pans instead, from
+     * where the view began, once it has moved, and one on the divider beside the names drags it.
      *
-     * @type {{ x: number, seq: number, ranging: boolean, pointerId: number }|null}
+     * @type {{ x: number, seq: number, ranging: boolean, pointerId: number, pan?: boolean, from?: number, moved?: boolean, resize?: boolean, clientX?: number, gutter?: number }|null}
      * @private
      */
     _press = null;
+
+    /**
+     * Where the pointer is across the charts right of the names, NaN while it is not over them.
+     *
+     * @type {number}
+     * @private
+     */
+    _pointerX = NaN;
+
+    /**
+     * Whether the divider beside the names is under the pointer or being dragged.
+     *
+     * @type {boolean}
+     * @private
+     */
+    _dividerHot = false;
+
+    /**
+     * The width of the names left of the charts and the timeline.
+     *
+     * @type {number}
+     * @private
+     */
+    _gutter = GUTTER;
+
+    /**
+     * The press on the frame timeline being held, which drags the divider beside the names or,
+     * with Shift while zoomed in, pans.
+     *
+     * @type {{ x: number, pointerId: number, resize?: boolean, clientX?: number, gutter?: number, pan?: boolean, from?: number, moved?: boolean }|null}
+     * @private
+     */
+    _timePress = null;
+
+    /**
+     * Where the pointer is across the timeline right of the names, NaN while it is not over it.
+     *
+     * @type {number}
+     * @private
+     */
+    _timePointerX = NaN;
+
+    /**
+     * The cursor of the timeline for what is under the pointer: a hand over a bar a click shows.
+     *
+     * @type {string}
+     * @private
+     */
+    _timeCursor = '';
+
+    /**
+     * Whether a press on the timeline dragged, so the click it ends in does nothing.
+     *
+     * @type {boolean}
+     * @private
+     */
+    _timeDragged = false;
+
+    /**
+     * Where the title of the timeline ends across it, which a click collapses or expands it up to.
+     *
+     * @type {number}
+     * @private
+     */
+    _timelineTitleEnd = 0;
+
+    /**
+     * The window whose Shift key the cursor follows while the pointer is over the charts.
+     *
+     * @type {Window|null}
+     * @private
+     */
+    _keyView = null;
 
     /**
      * What each hover box shows, to rebuild its lines only when that changes.
@@ -760,7 +906,7 @@ class PerfCharts {
         // a scrollbar under the plot of the charts, for the frames in view while zoomed in, and one
         // under the timeline, for the part of the frame in view
         this._scrollbar = new PerfScrollbar(doc, {
-            onDrag: start => this._scrollTo(this._capture.first + start * Math.max(1, this._capture.count)),
+            onDrag: start => this._scrollTo(this._capture.startPos + start * Math.max(1, this._capture.endPos - this._capture.startPos)),
             onPage: direction => this._scrollTo(this._span().from + direction * this._span().span),
             onWheel: delta => this._scrollTo(this._span().from + (delta / this._layout.plot) * this._span().span)
         });
@@ -769,7 +915,7 @@ class PerfCharts {
             onPage: direction => this._scrollTimeTo(this._timeLayout.from + direction * this._timeLayout.span),
             onWheel: delta => this._scrollTimeTo(this._timeLayout.from + (delta / this._timeLayout.plot) * this._timeLayout.span)
         });
-        for (const bar of [this._scrollbar, this._timeScrollbar]) bar.el.style.marginLeft = `${8 + GUTTER}px`;
+        for (const bar of [this._scrollbar, this._timeScrollbar]) bar.el.style.marginLeft = `${8 + this._gutter}px`;
 
         container.append(this._chartsEl, this._scrollbar.el, this._timelineEl, this._timeScrollbar.el, this._hoverEl);
 
@@ -782,6 +928,9 @@ class PerfCharts {
         canvas.addEventListener('wheel', this._onWheel, { passive: false });
         canvas.addEventListener('dblclick', this._onDoubleClick);
         canvas.addEventListener('contextmenu', this._onContextMenu);
+        this._timeline.addEventListener('pointerdown', this._onTimelineDown);
+        this._timeline.addEventListener('pointerup', this._onTimelineUp);
+        this._timeline.addEventListener('pointercancel', this._onTimelineUp);
         this._timeline.addEventListener('pointermove', this._onTimelineMove);
         this._timeline.addEventListener('click', this._onTimelineClick);
         this._timeline.addEventListener('pointerleave', this._onTimelineLeave);
@@ -797,6 +946,7 @@ class PerfCharts {
         this._resizeObserver?.disconnect();
         this._resizeObserver = null;
         this._resizeView = null;
+        this._watchKeys(false);
     }
 
     /**
@@ -831,6 +981,26 @@ class PerfCharts {
         drawn.timeline = false;
         drawn.overlay = false;
     };
+
+    /**
+     * The width of the names left of the charts and the timeline, in CSS pixels, which dragging
+     * the divider beside them changes. It keeps the plot at least a little wide.
+     *
+     * @type {number}
+     */
+    set gutter(value) {
+        const width = this._layout.plot + this._gutter;
+        const most = width > MIN_PLOT + MIN_GUTTER ? Math.min(MAX_GUTTER, width - MIN_PLOT) : MAX_GUTTER;
+        const next = Math.round(Math.max(MIN_GUTTER, Math.min(most, value)));
+        if (!Number.isFinite(next) || next === this._gutter) return;
+        this._gutter = next;
+        for (const bar of [this._scrollbar, this._timeScrollbar]) bar.el.style.marginLeft = `${8 + next}px`;
+        this.invalidate();
+    }
+
+    get gutter() {
+        return this._gutter;
+    }
 
     /**
      * The element holding the charts, which scrolls when they do not fit it.
@@ -1012,7 +1182,7 @@ class PerfCharts {
         const size = this._sizeOf(box);
         const width = size.width;
         height ??= size.height;
-        if (width <= GUTTER || height <= 0) return null;
+        if (width <= this._gutter || height <= 0) return null;
         const ctx = canvas.getContext('2d');
         if (!ctx) return null;
         const ratio = canvas.ownerDocument.defaultView?.devicePixelRatio ?? 1;
@@ -1040,53 +1210,66 @@ class PerfCharts {
     }
 
     /**
-     * @returns {{ from: number, span: number }} The frames in view: where they start and how many
-     * fit across.
+     * @returns {{ from: number, span: number }} The time in view on the time axis, in
+     * milliseconds: where it starts and how long it is.
      * @private
      */
     _span() {
         const capture = this._capture;
         const view = this._view;
+        const start = capture.startPos;
+        const end = capture.endPos;
         if (view) {
-            if (view.follow) view.from = capture.end - view.span;
-            view.from = Math.max(capture.first, Math.min(capture.end - view.span, view.from));
+            if (view.follow) view.from = end - view.span;
+            view.from = Math.max(start, Math.min(end - view.span, view.from));
             return view;
         }
-        return { from: capture.first, span: Math.max(MIN_SPAN, capture.count) };
+        return { from: start, span: Math.max(MIN_SPAN, end - start) };
     }
 
     /**
      * @param {number} x - A position across the charts right of the names, in CSS pixels.
-     * @returns {number} The frame drawn there, which may not be kept.
+     * @returns {number} The entry drawn there, the one before it in a gap, which may not be kept.
      * @private
      */
     _seqAt(x) {
         const { from, span, plot } = this._layout;
-        return Math.floor(from + (x / plot) * span);
+        return this._capture.seqAtPos(from + (x / plot) * span);
     }
 
     /**
-     * @param {number} seq - A frame.
+     * @param {number} seq - A kept entry.
      * @returns {number} Where it was drawn across the canvas, in CSS pixels.
      * @private
      */
     _xOf(seq) {
         const { from, span, plot } = this._layout;
-        return GUTTER + ((seq - from) / span) * plot;
+        return this._gutter + ((this._capture.get('pos', seq) - from) / span) * plot;
     }
 
     /**
-     * Scrolls a zoomed-in view to a frame, if it is out of view.
+     * @param {number} seq - A kept entry.
+     * @returns {number} How wide it was drawn, in CSS pixels.
+     * @private
+     */
+    _wOf(seq) {
+        const { span, plot } = this._layout;
+        return (this._capture.get('width', seq) / span) * plot;
+    }
+
+    /**
+     * Scrolls a zoomed-in view to an entry, if it is out of view.
      *
-     * @param {number} seq - The frame.
+     * @param {number} seq - The entry.
      * @private
      */
     _reveal(seq) {
         const view = this._view;
         if (!view) return;
         const { from, span } = this._span();
-        if (seq < from || seq >= from + span) {
-            view.from = seq - Math.floor(span / 2);
+        const pos = this._capture.get('pos', seq);
+        if (pos < from || pos >= from + span) {
+            view.from = pos - span / 2;
             view.follow = false;
         }
     }
@@ -1171,7 +1354,9 @@ class PerfCharts {
         for (let i = 0; i < CHARTS.length; i++) {
             if (!this.collapsed.has(CHARTS[i].key)) openCharts++;
         }
-        const sections = scriptsHeight + memoryHeight + resourcesHeight + eventsHeight + (CHARTS.length - openCharts) * SECTION_TITLE + CHART_GAP * (CHARTS.length + 3);
+        const loadingOpen = !this.collapsed.has('loading');
+        const loadingHeight = SECTION_TITLE + (loadingOpen ? LOADING_ROWS.reduce((sum, row) => sum + row.height + 1, 0) : 0);
+        const sections = scriptsHeight + loadingHeight + memoryHeight + resourcesHeight + eventsHeight + (CHARTS.length - openCharts) * SECTION_TITLE + CHART_GAP * (CHARTS.length + 4);
 
         // taller than the box when the charts would get too short in it: the box scrolls then
         const contentHeight = Math.max(this._sizeOf(this._chartsEl).height, sections + openCharts * MIN_CHART_HEIGHT);
@@ -1189,7 +1374,7 @@ class PerfCharts {
         const { budget, median } = captureNorms(capture);
         const { from, span } = this._span();
         // whole columns, so a frame lands in the same column whether drawn or picked
-        const plot = Math.max(1, Math.floor(width - GUTTER));
+        const plot = Math.max(1, Math.floor(width - this._gutter));
         const columns = plot;
         const perColumn = span / columns;
         const first = capture.first;
@@ -1205,14 +1390,21 @@ class PerfCharts {
         const chartHeight = openCharts ? Math.floor((height - sections) / openCharts) : 0;
         this._rows = [];
 
-        // the range of frames each column covers, shared by every chart
+        // the entries each column covers, shared by every chart: those starting in its time, and
+        // the one going on as it begins, so an entry spans every column of its time
         const lo = this._ints('lo', columns);
         const hi = this._ints('hi', columns);
+        const pos = d.pos;
+        const widths = d.width;
         for (let c = 0; c < columns; c++) {
-            const a = Math.floor(from + c * perColumn);
-            const b = Math.max(a + 1, Math.floor(from + (c + 1) * perColumn));
+            const t0 = from + c * perColumn;
+            const t1 = t0 + perColumn;
+            let a = capture.count ? capture.seqAtPos(t0) : first;
+            if (capture.count && pos[a % slots] + widths[a % slots] <= t0 && pos[a % slots] < t0) a++;
+            let b = capture.count ? capture.seqAtPos(t1) : first;
+            if (capture.count && pos[b % slots] < t1) b++;
             lo[c] = Math.max(first, a);
-            hi[c] = Math.min(end, b);
+            hi[c] = Math.min(end, Math.max(lo[c], b));
         }
         this._spans.lo = lo;
         this._spans.hi = hi;
@@ -1223,24 +1415,26 @@ class PerfCharts {
         // zoomed in until a frame spans several columns, a frame each, with a gap to the next once
         // there is room for one, so the frames read apart. Kept in arrays, so the many bars of a
         // redraw are drawn without making garbage
-        const frameWidth = plot / span;
+        // a frame of the median length wide enough on its own: each at its time, as wide as it was
+        const frameWidth = (Number.isFinite(median) ? median : 16) * plot / span;
         const wide = frameWidth > 1;
-        const barWidth = Math.max(1, frameWidth - (frameWidth >= 4 ? 1 : 0));
-        layout.barWidth = barWidth;
-        const visibleFrom = Math.max(first, Math.floor(from));
-        const visibleTo = Math.min(end, Math.ceil(from + span));
+        const visibleFrom = capture.count ? Math.max(first, lo[0]) : first;
+        const visibleTo = capture.count ? Math.min(end, Math.max(visibleFrom, hi[columns - 1])) : first;
         const bars = wide ? Math.max(0, visibleTo - visibleFrom) : columns;
         const barX = this._ints('barX', bars);
         const barW = this._ints('barW', bars);
         for (let i = 0; i < bars; i++) {
             if (wide) {
-                // the frame cut by the left edge is drawn from the edge
-                const x = this._xOf(visibleFrom + i);
-                const left = Math.max(GUTTER, Math.round(x));
+                // the entry cut by the left edge is drawn from the edge, and a gap to the next once
+                // there is room for one, so the frames read apart
+                const seq = visibleFrom + i;
+                const x = this._xOf(seq);
+                const w = this._wOf(seq);
+                const left = Math.max(this._gutter, Math.round(x));
                 barX[i] = left;
-                barW[i] = Math.round(x + barWidth) - left;
+                barW[i] = Math.max(1, Math.round(x + w) - left - (w >= 4 ? 1 : 0));
             } else {
-                barX[i] = GUTTER + i;
+                barX[i] = this._gutter + i;
                 barW[i] = 1;
             }
         }
@@ -1258,7 +1452,7 @@ class PerfCharts {
                 this._sectionTitle(ctx, chart.key, chart.title, top, false);
                 if (capture.has(shown)) {
                     ctx.fillStyle = shape.parts.length === 1 ? shape.parts[0].color : '#b9c4c7';
-                    ctx.fillText(chart.format(totals[capture.slot(shown)]), GUTTER + 4, top + 2);
+                    ctx.fillText(chart.format(totals[capture.slot(shown)]), this._gutter + 4, top + 2);
                 }
                 chartsBottom += SECTION_TITLE + CHART_GAP;
                 continue;
@@ -1266,7 +1460,7 @@ class PerfCharts {
             chartsBottom += chartHeight + CHART_GAP;
             this._rows.push({ top, height: chartHeight, chart: index });
             ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
-            ctx.fillRect(GUTTER, top, plot, chartHeight);
+            ctx.fillRect(this._gutter, top, plot, chartHeight);
 
             // the frame each column shows: its largest in this chart
             const peaks = this._floats('peaks', columns);
@@ -1294,24 +1488,24 @@ class PerfCharts {
                 ctx.setLineDash(DASH);
                 ctx.beginPath();
                 const y = Math.round(toY(budget)) + 0.5;
-                ctx.moveTo(GUTTER, y);
+                ctx.moveTo(this._gutter, y);
                 ctx.lineTo(width, y);
                 ctx.stroke();
                 ctx.setLineDash(NO_DASH);
             }
 
             if (peakCount === 0 && chart.empty && capture.count) {
-                PerfCharts._message(ctx, chart.empty, '#7f8f93', plot, top + chartHeight / 2 - 5);
+                this._message(ctx, chart.empty, '#7f8f93', plot, top + chartHeight / 2 - 5);
             }
 
             // the name and the figure of the frame shown beside the chart, its scale in its corner
             ctx.font = BOLD;
             ctx.fillStyle = '#dbe2e4';
-            ctx.fillText(`▾ ${chart.title}`, 4, top + 2);
+            this._gutterText(ctx, `▾ ${chart.title}`, 4, top + 2);
             ctx.font = FONT;
             if (capture.has(shown)) {
                 ctx.fillStyle = shape.parts.length === 1 ? shape.parts[0].color : '#b9c4c7';
-                ctx.fillText(chart.format(totals[capture.slot(shown)]), 14, top + 14);
+                this._gutterText(ctx, chart.format(totals[capture.slot(shown)]), 14, top + 14);
             }
             PerfCharts._label(ctx, chart.format(scale), width - 3, top + 2, 'right');
         }
@@ -1322,10 +1516,16 @@ class PerfCharts {
         this._lineCharts.scripts = scriptsOpen ?
             this._drawScriptChart(ctx, scripts, scriptsTop + SECTION_TITLE, width, plot, lo, hi, wide, visibleFrom, visibleTo, bars, barX, barW) : null;
 
+        // what loaded, on the time axis
+        const loadingTop = scriptsTop + scriptsHeight + CHART_GAP;
+        this._sectionTitle(ctx, 'loading', 'Loading', loadingTop, loadingOpen);
+        this._loadingDrawn = {};
+        if (loadingOpen) this._drawLoading(ctx, loadingTop + SECTION_TITLE, plot, from, span);
+
         // memory and the resources: a chart each, of lines sharing a scale from the smallest to
         // the largest value of the lines shown, beside a list of them that hides or shows each, so
         // hiding the large ones lets the small ones fill the chart
-        const memoryTop = scriptsTop + scriptsHeight + CHART_GAP;
+        const memoryTop = loadingTop + loadingHeight + CHART_GAP;
         this._sectionTitle(ctx, 'memory', 'Memory', memoryTop, memoryOpen);
         this._lineCharts.memory = memoryOpen ?
             this._drawLineChart(ctx, 'memory', this._memoryList(), formatBytes, max => Math.max(MEMORY_MIN_SHARE * max, MEMORY_MIN_BYTES),
@@ -1355,12 +1555,12 @@ class PerfCharts {
                 const top = eventsTop + SECTION_TITLE + k * EVENT_ROW;
                 this._rows.push({ top, height: EVENT_ROW, kind: k });
                 ctx.fillStyle = k % 2 ? 'rgba(255, 255, 255, 0.02)' : 'rgba(255, 255, 255, 0.04)';
-                ctx.fillRect(GUTTER, top, plot, EVENT_ROW);
+                ctx.fillRect(this._gutter, top, plot, EVENT_ROW);
                 const unsupported = !!eventUnsupported(capture, kind.key);
                 const on = !unsupported && !this.hidden.has(`events:${kind.key}`);
                 PerfCharts._checkbox(ctx, 10.5, top + 1.5, unsupported ? '#56656a' : kind.color, on);
                 ctx.fillStyle = on ? '#b9c4c7' : '#56656a';
-                ctx.fillText(kind.name, 23, top);
+                this._gutterText(ctx, kind.short ?? kind.name, 23, top);
                 if (!on) continue;
                 ctx.fillStyle = kind.color;
                 PerfCharts._drawMarks(ctx, masks, 1 << k, bars, barX, barW, top + 1, EVENT_ROW - 2);
@@ -1368,6 +1568,7 @@ class PerfCharts {
         }
 
         layout.bottom = eventsTop + eventsHeight;
+        this._drawStartupAndGaps(ctx, chartsBottom, plot);
         this._updateScrollbar();
 
         // nothing recorded yet: said in the first chart open, or beside the first title, where
@@ -1375,12 +1576,208 @@ class PerfCharts {
         if (capture.count === 0) {
             const first = this._rows.find(row => row.chart !== undefined);
             const y = first ? first.top + first.height / 2 - 5 : 2;
-            PerfCharts._message(ctx, capture.recording ? 'Recording…' : 'Press Record to capture frames', '#93a2a6', plot, y);
+            this._message(ctx, capture.recording ? 'Recording…' : 'Press Record to capture frames', '#93a2a6', plot, y);
         }
     }
 
     /**
-     * Sizes the thumb of the scrollbar to the frames in view, out of all those kept. It fills the
+     * What loaded over a time of the axis: the milestones, the assets and the requests of the kept
+     * entries, and the assets loading now, each with where it starts and ends on the axis.
+     *
+     * @param {number} from - Where the time starts on the axis.
+     * @param {number} to - Where it ends.
+     * @returns {Record<string, { p0: number, p1: number, load: PerfLoad }[]>} The items by row.
+     * @private
+     */
+    _loadingItems(from, to) {
+        const capture = this._capture;
+        /** @type {Record<string, { p0: number, p1: number, load: PerfLoad }[]>} */
+        const items = { milestones: [], assets: [], requests: [] };
+        if (!capture.count) return items;
+        const rows = { milestone: items.milestones, asset: items.assets, request: items.requests };
+        const add = (list, load, start, end) => {
+            const p1 = capture.posAt(end);
+            const p0 = Number.isFinite(start) ? capture.posAt(start) : p1;
+            if (p1 >= from && p0 <= to) list.push({ p0, p1, load });
+        };
+        for (let seq = capture.first; seq < capture.end; seq++) {
+            for (const load of capture.loads(seq)) add(rows[load.kind], load, load.start, load.end);
+        }
+        const now = performance.now();
+        for (const load of capture.pendingLoads()) add(items.assets, load, load.start, now);
+        return items;
+    }
+
+    /**
+     * Draws the Loading section: a row each of milestones, assets packed into lanes and the
+     * requests in flight, on the time axis of the charts.
+     *
+     * @param {CanvasRenderingContext2D} ctx - The context.
+     * @param {number} top - The top of the section's rows.
+     * @param {number} plot - The width of the plot.
+     * @param {number} from - Where the time in view starts on the axis.
+     * @param {number} span - How long it is.
+     * @private
+     */
+    _drawLoading(ctx, top, plot, from, span) {
+        const capture = this._capture;
+        const items = this._loadingItems(from, from + span);
+        const toX = p => this._gutter + ((p - from) / span) * plot;
+        const drawn = this._loadingDrawn;
+        let y = top;
+        ctx.save();
+        for (const row of LOADING_ROWS) {
+            this._rows.push({ top: y, height: row.height, loading: row.key });
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
+            ctx.fillRect(this._gutter, y, plot, row.height);
+            ctx.fillStyle = '#b9c4c7';
+            this._gutterText(ctx, row.name, 10, y + (row.height - 10) / 2);
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(this._gutter, y, plot, row.height);
+            ctx.clip();
+            const list = (drawn[row.key] = []);
+            const pixels = items[row.key].map(({ p0, p1, load }) => ({ x0: toX(p0), x1: Math.max(toX(p0) + 1, toX(p1)), lane: 0, load }));
+            if (row.key === 'milestones') {
+                pixels.sort((a, b) => a.x0 - b.x0);
+                for (let i = 0; i < pixels.length; i++) {
+                    const item = pixels[i];
+                    ctx.fillStyle = MILESTONE_COLOR;
+                    ctx.fillRect(Math.round(item.x0), y, 1, row.height);
+                    // named where there is room before the next
+                    const room = (pixels[i + 1]?.x0 ?? this._gutter + plot) - item.x0 - 6;
+                    const text = PerfCharts._fit(ctx, item.load.name, '', room);
+                    if (text) ctx.fillText(text, item.x0 + 3, y + 1);
+                    list.push(item);
+                }
+            } else if (row.key === 'assets') {
+                // packed into lanes, each asset in the first lane free at its start
+                pixels.sort((a, b) => a.x0 - b.x0);
+                const ends = new Array(ASSET_LANES).fill(-Infinity);
+                for (const item of pixels) {
+                    let lane = ends.findIndex(end => end < item.x0);
+                    if (lane < 0) lane = ends.indexOf(Math.min(...ends));
+                    ends[lane] = item.x1;
+                    item.lane = lane;
+                    const load = item.load;
+                    const ly = y + 1 + lane * (ASSET_LANE + 1);
+                    const color = load.failed ? FAILED_COLOR : ASSET_COLORS[load.type] ?? ASSET_COLOR;
+                    ctx.fillStyle = color;
+                    ctx.globalAlpha = 0.45;
+                    ctx.fillRect(Math.round(item.x0), ly, Math.max(1, Math.round(item.x1 - item.x0)), ASSET_LANE);
+                    ctx.globalAlpha = 1;
+                    // the request of its file solid
+                    if (Number.isFinite(load.netEnd) && !load.failed) {
+                        const n0 = toX(capture.posAt(load.netStart));
+                        const n1 = toX(capture.posAt(load.netEnd));
+                        ctx.fillRect(Math.round(n0), ly, Math.max(1, Math.round(n1 - n0)), ASSET_LANE);
+                    }
+                    list.push(item);
+                }
+            } else {
+                // how many requests were in flight across each column
+                const counts = new Int32Array(plot);
+                for (const item of pixels) {
+                    for (let c = Math.max(0, Math.floor(item.x0 - this._gutter)); c <= Math.min(plot - 1, Math.floor(item.x1 - this._gutter)); c++) counts[c]++;
+                    list.push(item);
+                }
+                let most = 0;
+                for (let c = 0; c < plot; c++) most = Math.max(most, counts[c]);
+                ctx.fillStyle = REQUEST_COLOR;
+                for (let c = 0; c < plot; c++) {
+                    if (!counts[c]) continue;
+                    const h = Math.max(1, Math.round((counts[c] / most) * (row.height - 2)));
+                    ctx.fillRect(this._gutter + c, y + row.height - 1 - h, 1, h);
+                }
+                if (most) PerfCharts._label(ctx, `${most}`, this._gutter + plot - 3, y + 1, 'right');
+            }
+            ctx.restore();
+            y += row.height + 1;
+        }
+        ctx.restore();
+    }
+
+    /**
+     * @param {string} key - A row of the Loading section.
+     * @param {number} x - Where the pointer is across the plot, negative over the names.
+     * @returns {PerfHoverLine[]} What the row has under the pointer, the longest first, or what the
+     * row shows over its name.
+     * @private
+     */
+    _loadingLines(key, x) {
+        const row = LOADING_ROWS.find(r => r.key === key);
+        if (x < 0) return key === 'assets' ? [{ text: row.tip, wrap: true }, ...assetKey()] : [{ text: row.tip, wrap: true }];
+        const px = x + this._gutter;
+        const drawn = this._loadingDrawn[key] ?? [];
+        const slack = key === 'milestones' ? 3 : 1;
+        const under = drawn.filter(item => px >= item.x0 - slack && px <= item.x1 + slack);
+        if (!under.length) return [];
+        const duration = item => (Number.isFinite(item.load.start) ? item.load.end - item.load.start : 0);
+        under.sort((a, b) => (key === 'milestones' ? a.x0 - b.x0 : duration(b) - duration(a)));
+        /** @type {PerfHoverLine[]} */
+        const lines = [];
+        if (key === 'requests') lines.push({ text: `${under.length} ${under.length === 1 ? 'request' : 'requests'} in flight` });
+        if (key === 'assets') lines.push({ text: `${under.length} ${under.length === 1 ? 'asset' : 'assets'} loading` });
+        for (const item of under.slice(0, HOVER_SCRIPT_TYPES)) lines.push({ text: loadText(item.load), color: loadColor(item.load), indent: key === 'requests' || key === 'assets' });
+        if (under.length > HOVER_SCRIPT_TYPES) lines.push({ text: `… and ${under.length - HOVER_SCRIPT_TYPES} more`, indent: true });
+        if (key === 'assets') lines.push({ text: 'Click an asset to show it on the Assets tab' });
+        return lines;
+    }
+
+    /**
+     * Marks the start of the app over the charts, which have no figures for it, and the long
+     * times between entries folded away, with how long each was.
+     *
+     * @param {CanvasRenderingContext2D} ctx - The context.
+     * @param {number} chartsBottom - The bottom of the charts.
+     * @param {number} plot - The width of the plot.
+     * @private
+     */
+    _drawStartupAndGaps(ctx, chartsBottom, plot) {
+        const capture = this._capture;
+        if (!capture.count) return;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(this._gutter, 0, plot, chartsBottom);
+        ctx.clip();
+        const first = capture.first;
+        if (capture.isStartup(first)) {
+            const x = Math.round(this._xOf(first));
+            const w = Math.max(1, Math.round(this._wOf(first)));
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.fillRect(x, 0, w, chartsBottom);
+            // hatched, as it has no figures of a frame
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
+            ctx.beginPath();
+            for (let i = -chartsBottom; i < w; i += 8) {
+                ctx.moveTo(x + i, chartsBottom);
+                ctx.lineTo(x + i + chartsBottom, 0);
+            }
+            ctx.stroke();
+            // labelled at the left of what is in view of it
+            const left = Math.max(x, this._gutter);
+            const label = PerfCharts._fit(ctx, 'Startup', formatDuration(capture.get('width', first)), Math.min(x + w, this._gutter + plot) - left - 8);
+            if (label) PerfCharts._label(ctx, label, left + 4, 16, 'left');
+        }
+        // the gaps, a break line in each with how long it was
+        for (let seq = first + 1; seq < capture.end; seq++) {
+            const gap = capture.get('gap', seq);
+            if (!(gap > 0)) continue;
+            const x1 = Math.round(this._xOf(seq));
+            const x0 = Math.round(this._xOf(seq - 1) + this._wOf(seq - 1));
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(x0, 0, Math.max(1, x1 - x0), chartsBottom);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+            ctx.fillRect(Math.round((x0 + x1) / 2), 0, 1, chartsBottom);
+            const label = `+${formatDuration(gap)}`;
+            const left = Math.max(x0, this._gutter);
+            if (ctx.measureText(label).width + 6 < Math.min(x1, this._gutter + plot) - left) PerfCharts._label(ctx, label, left + 3, 16, 'left');
+        }
+        ctx.restore();
+    }
+
+    /**
+     * Sizes the thumb of the scrollbar to the time in view, out of all that is kept. It fills the
      * bar, dimmed, while the whole capture is in view.
      *
      * @private
@@ -1388,24 +1785,24 @@ class PerfCharts {
     _updateScrollbar() {
         const capture = this._capture;
         const { from, span } = this._span();
-        const total = Math.max(1, capture.count);
+        const total = Math.max(1, capture.endPos - capture.startPos);
         const zoomed = !!this._view && span < total;
-        this._scrollbar.set(zoomed ? (from - capture.first) / total : 0, zoomed ? span / total : 1);
+        this._scrollbar.set(zoomed ? (from - capture.startPos) / total : 0, zoomed ? span / total : 1);
     }
 
     /**
-     * Moves a zoomed-in view so it starts at a frame, following the newest frames when it reaches
+     * Moves a zoomed-in view so it starts at a time, following the newest frames when it reaches
      * them.
      *
-     * @param {number} from - The first frame to view.
+     * @param {number} from - Where on the time axis the view starts.
      * @private
      */
     _scrollTo(from) {
         const view = this._view;
         if (!view) return;
         const capture = this._capture;
-        view.from = Math.max(capture.first, Math.min(capture.end - view.span, from));
-        view.follow = view.from + view.span >= capture.end;
+        view.from = Math.max(capture.startPos, Math.min(capture.endPos - view.span, from));
+        view.follow = view.from + view.span >= capture.endPos;
         this._updateScrollbar();
         this.invalidate();
     }
@@ -1657,9 +2054,9 @@ class PerfCharts {
         const height = rows * SCRIPT_ROW;
         this._legendSignature = legend.signature;
         ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
-        ctx.fillRect(GUTTER, top, plot, height);
+        ctx.fillRect(this._gutter, top, plot, height);
         if (!list.length) {
-            PerfCharts._message(ctx, this._scriptsEmpty(), '#7f8f93', plot, top + height / 2 - 5);
+            this._message(ctx, this._scriptsEmpty(), '#7f8f93', plot, top + height / 2 - 5);
             return null;
         }
 
@@ -1708,7 +2105,7 @@ class PerfCharts {
             if (entry?.control) {
                 this._rows.push({ top: y, height: SCRIPT_ROW, lines: 'scripts', index: -1, control: entry.control });
                 ctx.fillStyle = '#93a2a6';
-                ctx.fillText(entry.control === 'more' ? `▸ ${Math.min(SCRIPT_ROWS, legend.others)} more` : '▴ Fewer', 10, y + 1);
+                this._gutterText(ctx, entry.control === 'more' ? `▸ ${Math.min(SCRIPT_ROWS, legend.others)} more` : '▴ Fewer', 10, y + 1);
                 continue;
             }
             const i = entry ? entry.index : -1;
@@ -1717,7 +2114,7 @@ class PerfCharts {
             const line = list[i];
             PerfCharts._checkbox(ctx, 10.5, y + 2.5, line.color, !hidden[i]);
             ctx.fillStyle = hidden[i] ? '#56656a' : '#b9c4c7';
-            ctx.fillText(PerfCharts._fit(ctx, `${line.pinned ? '📌' : ''}${line.name}`, '', GUTTER - 26), 23, y + 1);
+            this._gutterText(ctx, `${line.pinned ? '📌' : ''}${line.name}`, 23, y + 1);
         }
         // stacked from the first of the list up, so the longest is the steady base and the others
         // ride on top
@@ -1788,7 +2185,7 @@ class PerfCharts {
         const slots = capture.slots;
         const height = lines.length * rowHeight;
         ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
-        ctx.fillRect(GUTTER, top, plot, height);
+        ctx.fillRect(this._gutter, top, plot, height);
 
         // the list, a box each, ticked while the line shows
         const range = this._floats('lineRange', 2);
@@ -1801,7 +2198,7 @@ class PerfCharts {
             const on = !line.unsupported && !this.hidden.has(`${section}:${line.key}`);
             PerfCharts._checkbox(ctx, 10.5, y + 2.5, line.unsupported ? '#56656a' : line.color, on);
             ctx.fillStyle = on ? '#b9c4c7' : '#56656a';
-            ctx.fillText(line.name, 23, y + 1);
+            this._gutterText(ctx, line.name, 23, y + 1);
             if (!on) continue;
             PerfCharts._rangeOf(d[line.key], slots, visibleFrom, visibleTo, range);
             if (range[0] < min) min = range[0];
@@ -1904,7 +2301,7 @@ class PerfCharts {
         this._rows.push({ top, height: SECTION_TITLE, section: key });
         ctx.font = BOLD;
         ctx.fillStyle = '#dbe2e4';
-        ctx.fillText(`${open ? '▾' : '▸'} ${title}`, 4, top + 2);
+        this._gutterText(ctx, `${open ? '▾' : '▸'} ${title}`, 4, top + 2);
         ctx.font = FONT;
     }
 
@@ -1919,27 +2316,33 @@ class PerfCharts {
         if (!prepared) return;
         const { ctx } = prepared;
         const capture = this._capture;
-        const { bottom, barWidth } = this._layout;
-        if (this.range) {
+        const { bottom, plot } = this._layout;
+        // the marks of entries cut to the plot, as one zoomed into begins left of it
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(this._gutter, 0, plot, bottom);
+        ctx.clip();
+        if (this.range && capture.has(this.range.from) && capture.has(this.range.to)) {
             const x0 = this._xOf(this.range.from);
-            const x1 = this._xOf(this.range.to + 1);
+            const x1 = this._xOf(this.range.to) + this._wOf(this.range.to);
             ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
             ctx.fillRect(x0, 0, Math.max(1, x1 - x0), bottom);
         }
-        // a frame wide enough is covered whole and edged, a narrower one marked by a line through
+        // an entry wide enough is covered whole and edged, a narrower one marked by a line through
         // its middle
         const mark = (seq, fill, edge) => {
             const x = this._xOf(seq);
-            if (x < GUTTER) return;
-            if (barWidth >= 3) {
+            const w = this._wOf(seq);
+            if (x + w < this._gutter) return;
+            if (w >= 3) {
                 ctx.fillStyle = fill;
-                ctx.fillRect(x, 0, barWidth, bottom);
+                ctx.fillRect(x, 0, w, bottom);
                 ctx.fillStyle = edge;
                 ctx.fillRect(x, 0, 1, bottom);
-                ctx.fillRect(x + barWidth - 1, 0, 1, bottom);
+                ctx.fillRect(x + w - 1, 0, 1, bottom);
             } else {
                 ctx.fillStyle = edge;
-                ctx.fillRect(Math.round(x + barWidth / 2) - 1, 0, 2, bottom);
+                ctx.fillRect(Math.round(x + w / 2) - 1, 0, 2, bottom);
             }
         };
         const shown = capture.count ? this.shown : -1;
@@ -1947,15 +2350,28 @@ class PerfCharts {
             mark(this._hover, 'rgba(255, 255, 255, 0.1)', 'rgba(255, 255, 255, 0.4)');
         }
         if (shown >= 0) mark(shown, 'rgba(255, 255, 255, 0.22)', '#ffffff');
+        ctx.restore();
+        this._drawDivider(ctx, bottom);
 
         // the level under the pointer, across the chart it is over, with its value at the left
         const level = this._level;
         if (level) {
-            const { plot } = this._layout;
             ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-            ctx.fillRect(GUTTER, level.y, plot, 1);
-            PerfCharts._label(ctx, level.format(level.value), GUTTER + 4, level.y - 13 < 0 ? level.y + 3 : level.y - 13, 'left');
+            ctx.fillRect(this._gutter, level.y, plot, 1);
+            PerfCharts._label(ctx, level.format(level.value), this._gutter + 4, level.y - 13 < 0 ? level.y + 3 : level.y - 13, 'left');
         }
+    }
+
+    /**
+     * Draws the divider between the names and the plot, brighter while under the pointer.
+     *
+     * @param {CanvasRenderingContext2D} ctx - The context.
+     * @param {number} height - How far down it goes.
+     * @private
+     */
+    _drawDivider(ctx, height) {
+        ctx.fillStyle = this._dividerHot ? 'rgba(255, 255, 255, 0.45)' : 'rgba(255, 255, 255, 0.07)';
+        ctx.fillRect(this._gutter - (this._dividerHot ? 3 : 2), 0, this._dividerHot ? 2 : 1, height);
     }
 
     /**
@@ -1988,10 +2404,10 @@ class PerfCharts {
      * @param {number} y - Its top.
      * @private
      */
-    static _message(ctx, text, color, plot, y) {
+    _message(ctx, text, color, plot, y) {
         ctx.fillStyle = color;
         ctx.textAlign = 'center';
-        ctx.fillText(PerfCharts._fit(ctx, text, '', plot - 8), GUTTER + plot / 2, y);
+        ctx.fillText(PerfCharts._fit(ctx, text, '', plot - 8), this._gutter + plot / 2, y);
         ctx.textAlign = 'left';
     }
 
@@ -2021,6 +2437,21 @@ class PerfCharts {
             else hi = mid - 1;
         }
         return lo ? `${name.slice(0, lo).trimEnd()}…` : '';
+    }
+
+    /**
+     * Draws a name in the gutter left of the plot, cut to what fits before the plot, as the width
+     * of the font differs between systems.
+     *
+     * @param {CanvasRenderingContext2D} ctx - The context, with the font set.
+     * @param {string} text - The name.
+     * @param {number} x - Where it starts.
+     * @param {number} y - Its top.
+     * @private
+     */
+    _gutterText(ctx, text, x, y) {
+        const fitted = PerfCharts._fit(ctx, text, '', this._gutter - x - 4);
+        if (fitted) ctx.fillText(fitted, x, y);
     }
 
     /**
@@ -2145,18 +2576,79 @@ class PerfCharts {
 
         this._gpuBars(from, to, bars);
 
-        // the events of a single frame; an average frame has none of its own
+        // the events of a single frame, and what loaded during it; an average frame has none of
+        // its own
         if (!range) {
             const tick = d.tick[capture.slot(from)];
             for (const event of capture.events(from)) {
-                const kind = EVENT_KINDS.find(k => k.key === (event.kind === 'long' ? 'long' : event.kind === 'asset' ? 'asset' : 'marker'));
+                const kind = EVENT_KINDS.find(k => k.key === (event.kind === 'long' ? 'long' : 'marker'));
                 const at = Math.max(0, event.start - tick);
                 bars.push({ lane: 'events', start: at, duration: event.duration - (at - (event.start - tick)), color: kind.color, name: event.name, positioned: true, instant: event.duration <= 0 });
             }
+            this._loadBars(from, bars);
         }
 
-        const title = range ? `Frames ${from + 1}–${to + 1}, average` : `Frame ${from + 1}`;
-        return { title, interval: mean('interval'), frames, bars };
+        const title = range ? `${capture.rangeLabel(from, to)}, average` : capture.label(from);
+        // the start of the app has no frame interval: it is as long as it lasted
+        const interval = !range && capture.isStartup(from) ? d.width[capture.slot(from)] : mean('interval');
+        return { title, interval, frames, bars };
+    }
+
+    /**
+     * Adds what loaded during an entry to the bars of its timeline: the moments in it, and the
+     * assets and the requests going on in it, each packed into the first lane free at its start,
+     * cut to the entry.
+     *
+     * @param {number} seq - The entry.
+     * @param {PerfTimeBar[]} bars - Receives the bars.
+     * @private
+     */
+    _loadBars(seq, bars) {
+        const capture = this._capture;
+        const d = capture.data;
+        const slot = capture.slot(seq);
+        const tick = d.tick[slot];
+        const end = tick + d.width[slot];
+        const now = performance.now();
+        const kinds = { milestone: [], asset: [], request: [] };
+        const take = (load, loadEnd) => {
+            const start = Number.isFinite(load.start) ? load.start : loadEnd;
+            if (loadEnd >= tick && start <= end) kinds[load.kind].push({ load, start, end: loadEnd });
+        };
+        for (let s = capture.first; s < capture.end; s++) {
+            for (const load of capture.loads(s)) take(load, load.end);
+        }
+        for (const load of capture.pendingLoads()) take(load, now);
+
+        for (const { load, start } of kinds.milestone) {
+            bars.push({ lane: 'milestones', start: start - tick, duration: 0, color: loadColor(load), name: load.name, label: loadText(load), positioned: true, instant: true });
+        }
+        for (const [kind, prefix, count] of [['asset', 'asset', TIMELINE_ASSET_LANES], ['request', 'request', TIMELINE_REQUEST_LANES]]) {
+            const list = kinds[kind].sort((a, b) => a.start - b.start);
+            const ends = new Array(count).fill(-Infinity);
+            // the bar before in each lane, whose label stops where the next bar begins, as a lane
+            // full up takes bars over the ones still in it
+            const last = new Array(count).fill(null);
+            for (const { load, start, end: loadEnd } of list) {
+                let lane = ends.findIndex(e => e <= start);
+                if (lane < 0) lane = ends.indexOf(Math.min(...ends));
+                ends[lane] = loadEnd;
+                const from = Math.max(0, start - tick);
+                const to = Math.min(end, loadEnd) - tick;
+                if (last[lane]) last[lane].labelEnd = from;
+                bars.push(last[lane] = {
+                    lane: `${prefix}${lane}`,
+                    start: from,
+                    duration: Math.max(0, to - from),
+                    color: loadColor(load),
+                    name: load.name,
+                    label: loadText(load),
+                    positioned: true,
+                    instant: !(to > from),
+                    ...(load.id !== undefined ? { asset: load.id } : {})
+                });
+            }
+        }
     }
 
     /**
@@ -2306,9 +2798,9 @@ class PerfCharts {
     timelineJson() {
         const model = this._timelineModel();
         if (!model) return null;
-        const rows = { cpu: 'CPU', detail: 'Update and render', types: 'Script types', gpu: 'GPU', gpuPasses: 'Passes of the effects', events: 'Events' };
+        const rows = { cpu: 'CPU', detail: 'Update and render', types: 'Script types', gpu: 'GPU', gpuPasses: 'Passes of the effects', events: 'Events', milestones: 'Milestones' };
         const bars = model.bars.filter(bar => bar.duration > 0 || bar.instant).map(bar => ({
-            row: rows[bar.lane],
+            row: rows[bar.lane] ?? (bar.lane.startsWith('asset') ? 'Assets' : bar.lane.startsWith('request') ? 'Requests' : bar.lane),
             name: bar.name,
             start: bar.positioned && Number.isFinite(bar.start) ? bar.start : null,
             duration: bar.instant ? 0 : bar.duration,
@@ -2380,17 +2872,36 @@ class PerfCharts {
         const typed = !!model?.bars.some(bar => bar.lane === 'types');
         // and for the passes of the GPU effects, where the frame graph says which effect runs them
         const owned = !!model?.bars.some(bar => bar.lane === 'gpuPasses');
-        const timelineHeight = TIMELINE_HEIGHT + (typed ? SCRIPT_TYPES_LINE : 0) + (owned ? GPU_PASSES_LINE : 0);
+        // and a lane each for the milestones, the assets and the requests of the entry
+        const loadingLanes = [];
+        if (model?.bars.some(bar => bar.lane === 'milestones')) loadingLanes.push({ key: 'milestones', name: 'Milestones', title: 'Milestones' });
+        for (const [prefix, count, name] of [['asset', TIMELINE_ASSET_LANES, 'Assets'], ['request', TIMELINE_REQUEST_LANES, 'Requests']]) {
+            for (let i = 0; i < count; i++) {
+                if (model?.bars.some(bar => bar.lane === `${prefix}${i}`)) loadingLanes.push({ key: `${prefix}${i}`, name: i ? '' : name, title: name });
+            }
+        }
+        // collapsed from its title, only the title is left
+        const collapsed = this.collapsed.has('timeline');
+        const groups = 2 + (loadingLanes.length ? 1 : 0);
+        const timelineHeight = collapsed ? TIMELINE_TITLE :
+            TIMELINE_HEIGHT + groups * TIMELINE_GROUP_GAP + (typed ? SCRIPT_TYPES_LINE : 0) + (owned ? GPU_PASSES_LINE : 0) + loadingLanes.length * LOADING_LINE;
         if (timelineHeight !== this._timelineHeight) {
             this._timelineHeight = timelineHeight;
             this._timelineEl.style.height = `${timelineHeight}px`;
         }
         const prepared = this._prepare(this._timeline, this._timelineEl, timelineHeight);
         this._bars = [];
+        this._lanes = [];
+        this._timeScrollbar.el.style.display = collapsed ? 'none' : '';
         if (!prepared) return;
         const { ctx, width, height } = prepared;
         if (!model) {
             this._timeScrollbar.set(0, 1);
+            this._timelineTitleEnd = 0;
+            return;
+        }
+        if (collapsed) {
+            this._drawTimelineTitle(ctx, model, false);
             return;
         }
 
@@ -2401,7 +2912,7 @@ class PerfCharts {
             if (bar.lane === 'gpu') gpuTotal += bar.duration;
         }
         const length = Math.max(interval, Number.isFinite(budget) ? budget : 0, gpuTotal);
-        const plot = width - GUTTER;
+        const plot = width - this._gutter;
 
         // the part of the frame in view
         const view = this._timeView;
@@ -2417,7 +2928,7 @@ class PerfCharts {
         layout.length = length;
         layout.plot = plot;
         this._timeScrollbar.set(from / length, span / length);
-        const toX = t => GUTTER + ((t - from) / span) * plot;
+        const toX = t => this._gutter + ((t - from) / span) * plot;
 
         // the CPU, and below it, unnamed as in a flame chart, what its update and its render are
         // made of, and the script types; then the GPU, and below it the passes of its effects
@@ -2426,31 +2937,47 @@ class PerfCharts {
             { key: 'detail', name: '', title: 'Update and render', y: 29, h: 10 }
         ];
         let y = 39;
+        // a line across the gap between groups of lanes
+        const separators = [];
+        const group = () => {
+            separators.push(y + 2 + TIMELINE_GROUP_GAP / 2);
+            y += TIMELINE_GROUP_GAP;
+        };
         if (typed) {
             lanes.push({ key: 'types', name: '', title: 'Script types', y: y + 3, h: 10 });
             y += SCRIPT_TYPES_LINE;
         }
+        group();
         lanes.push({ key: 'gpu', name: 'GPU', title: 'GPU passes', y: y + 4, h: 10 });
         y += 14;
         if (owned) {
             lanes.push({ key: 'gpuPasses', name: '', title: 'Passes of the effects', y: y + 1, h: 10 });
             y += GPU_PASSES_LINE;
         }
+        group();
         lanes.push({ key: 'events', name: 'Events', title: 'Events', y: y + 4, h: 8 });
+        y += 12;
+        if (loadingLanes.length) group();
+        for (const loading of loadingLanes) {
+            lanes.push({ ...loading, y: y + 3, h: 8 });
+            y += LOADING_LINE;
+        }
         const lane = Object.fromEntries(lanes.map(l => [l.key, l]));
         this._lanes = lanes;
         for (const { name, y, h } of lanes) {
             ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
-            ctx.fillRect(GUTTER, y, plot, h);
+            ctx.fillRect(this._gutter, y, plot, h);
             ctx.fillStyle = '#b9c4c7';
-            ctx.fillText(name, 6, y + (h - 10) / 2);
+            this._gutterText(ctx, name, 6, y + (h - 10) / 2);
         }
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+        for (const separator of separators) ctx.fillRect(4, Math.round(separator), width - 4, 1);
 
         // the bars, cut to the plot while zoomed in; an instant, or a span too short to see, is
         // drawn a pixel wide
         ctx.save();
         ctx.beginPath();
-        ctx.rect(GUTTER, 0, plot, height);
+        ctx.rect(this._gutter, 0, plot, height);
         ctx.clip();
         // the labels once every bar is drawn, as the label of a run spans the bars after its first
         const labels = [];
@@ -2459,7 +2986,7 @@ class PerfCharts {
             const row = lane[bar.lane];
             const x0 = toX(bar.start);
             const x1 = Math.max(x0 + 1, toX(bar.start + Math.max(0, bar.duration)));
-            if (x1 < GUTTER || x0 > width) continue;
+            if (x1 < this._gutter || x0 > width) continue;
             ctx.fillStyle = bar.color;
             // the passes of a run are told apart by a gap, where there is room for one
             const inRun = bar.run !== undefined;
@@ -2467,19 +2994,21 @@ class PerfCharts {
             if (bar.run !== 0) {
                 // a run is labelled once, across it, with how many passes it has
                 const runEnd = bar.run > 1 ? Math.max(x1, toX(bar.start + bar.runDuration)) : x1;
-                const left = Math.max(GUTTER, x0);
+                const left = Math.max(this._gutter, x0);
                 const name = bar.run > 1 ? `${bar.name} ×${bar.run}` : bar.name;
-                const text = PerfCharts._fit(ctx, name, bar.instant ? '' : formatMs(bar.run > 1 ? bar.runDuration : bar.duration), Math.min(width, runEnd) - left - 6);
+                const labelEnd = bar.labelEnd !== undefined ? toX(bar.labelEnd) : Infinity;
+                const text = PerfCharts._fit(ctx, name, bar.instant ? '' : formatMs(bar.run > 1 ? bar.runDuration : bar.duration), Math.min(width, runEnd, labelEnd) - left - 6);
                 if (text) labels.push(text, left + 3, row.y + (row.h - 10) / 2);
             }
-            this._bars.push({ x0, x1, lane: bar.lane, name: bar.name, color: bar.color, duration: bar.instant ? 0 : bar.duration, start: bar.positioned ? bar.start : NaN, calls: bar.calls, label: bar.label, script: bar.script, pass: bar.pass, children: bar.children });
+            this._bars.push({ x0, x1, lane: bar.lane, name: bar.name, color: bar.color, duration: bar.instant ? 0 : bar.duration, start: bar.positioned ? bar.start : NaN, calls: bar.calls, label: bar.label, script: bar.script, pass: bar.pass, asset: bar.asset, children: bar.children });
         }
         ctx.fillStyle = '#0b0f10';
         for (let i = 0; i < labels.length; i += 3) ctx.fillText(labels[i], labels[i + 1], labels[i + 2]);
 
         // the end of the frame, and the display interval
         const lineTop = lane.cpu.y - 2;
-        const lineHeight = lane.events.y + lane.events.h + 2 - lineTop;
+        const lastLane = lanes[lanes.length - 1];
+        const lineHeight = lastLane.y + lastLane.h + 2 - lineTop;
         ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
         ctx.fillRect(Math.min(width - 1, toX(interval)), lineTop, 1, lineHeight);
         if (Number.isFinite(budget)) {
@@ -2503,12 +3032,28 @@ class PerfCharts {
             }
         }
 
+        this._drawTimelineTitle(ctx, model, true);
+        this._drawDivider(ctx, height);
+    }
+
+    /**
+     * Draws the title of the timeline, which a click collapses or expands, with the length of the
+     * frame.
+     *
+     * @param {CanvasRenderingContext2D} ctx - The context.
+     * @param {{ title: string, interval: number }} model - What the timeline shows.
+     * @param {boolean} open - Whether the timeline is expanded.
+     * @private
+     */
+    _drawTimelineTitle(ctx, model, open) {
+        const title = `${open ? '▾' : '▸'} ${model.title}`;
         ctx.font = BOLD;
         ctx.fillStyle = '#dbe2e4';
-        ctx.fillText(model.title, 6, 2);
-        const titleWidth = ctx.measureText(model.title).width;
+        ctx.fillText(title, 4, 2);
+        const titleWidth = ctx.measureText(title).width;
         ctx.font = FONT;
-        PerfCharts._label(ctx, formatMs(interval), Math.max(GUTTER, 14 + titleWidth), 2, 'left');
+        this._timelineTitleEnd = 4 + titleWidth;
+        PerfCharts._label(ctx, formatMs(model.interval), Math.max(this._gutter, 12 + titleWidth), 2, 'left');
     }
 
     /**
@@ -2519,7 +3064,7 @@ class PerfCharts {
      */
     _onTimelineWheel = (e) => {
         const layout = this._timeLayout;
-        const x = e.clientX - this._timeline.getBoundingClientRect().left - GUTTER;
+        const x = e.clientX - this._timeline.getBoundingClientRect().left - this._gutter;
         if (x < 0) return;
         e.preventDefault();
         const { from, span, length, plot } = layout;
@@ -2549,7 +3094,7 @@ class PerfCharts {
      */
     _locate(e) {
         const rect = this._canvas.getBoundingClientRect();
-        const x = e.clientX - rect.left - GUTTER;
+        const x = e.clientX - rect.left - this._gutter;
         const y = e.clientY - rect.top;
         const row = this._rows.find(r => y >= r.top && y < r.top + r.height) ?? null;
         return { x, y, row, column: Math.floor(x) };
@@ -2608,6 +3153,7 @@ class PerfCharts {
         const chart = row.chart !== undefined ? CHARTS[row.chart] : null;
         const kind = row.kind !== undefined ? EVENT_KINDS[row.kind] : null;
         if (row.lines) return this._lineChartLines(row.lines, row.index, x, column, row.control);
+        if (row.loading) return this._loadingLines(row.loading, x);
         if (x < 0) {
             const tip = chart?.tip ?? kind?.tip;
             const lines = tip ? [{ text: tip, wrap: true }] : [];
@@ -2626,7 +3172,7 @@ class PerfCharts {
             /** @type {PerfHoverLine[]} */
             const lines = [];
             for (const seq of frames.slice(0, HOVER_FRAMES)) {
-                lines.push({ text: `Frame ${seq + 1}` });
+                lines.push({ text: capture.label(seq) });
                 for (const text of eventLines(capture, seq, kind.key)) lines.push({ text, color: kind.color, indent: true });
             }
             if (frames.length > HOVER_FRAMES) lines.push({ text: `… and ${frames.length - HOVER_FRAMES} more frames` });
@@ -2645,7 +3191,7 @@ class PerfCharts {
         const without = shape.reduced ? `, without the inspector's ${chart.format(d.inspector[s])}` : '';
         /** @type {PerfHoverLine[]} */
         const lines = [
-            { text: `Frame ${seq + 1}${many > 1 ? `, the largest of ${many} frames here` : ''}` },
+            { text: `${capture.label(seq)}${many > 1 ? `, the largest of ${many} frames here` : ''}` },
             // a chart of one part has its color on the total, the others on each part
             { text: `${chart.title} ${chart.format(total)}${fps}${without}`, color: shape.parts.length === 1 ? shape.parts[0].color : undefined }
         ];
@@ -2728,7 +3274,7 @@ class PerfCharts {
         const s = capture.slot(seq);
         if (drawn.stacked) {
             /** @type {PerfHoverLine[]} */
-            const lines = [{ text: `Frame ${seq + 1}` }];
+            const lines = [{ text: capture.label(seq) }];
             if (!(d.scriptsTotal[s] >= 0)) return [...lines, { text: 'Scripts were not timed in this frame', indent: true }];
             lines.push({ text: `Scripts ${formatMs(d.scriptsTotal[s])} · ${callCount(d.scriptCalls[s])}` });
             // the calls of each type, the other scripts' being what the listed ones leave
@@ -2742,7 +3288,8 @@ class PerfCharts {
                 return n;
             };
             const entries = drawn.lines.map((l, i) => ({ l, v: drawn.values[i][s], n: callsOf(l) })).filter(({ v }) => v > 0);
-            entries.sort((a, b) => b.v - a.v);
+            // longest first, the other scripts last with what they are made of
+            entries.sort((a, b) => Number(a.l.id === -1) - Number(b.l.id === -1) || b.v - a.v);
             for (const { l, v, n } of entries) {
                 const hidden = this.hidden.has(`${section}:${l.key}`) ? ', hidden' : '';
                 lines.push({ text: `${l.name} ${formatMs(v)} · ${callCount(n)}${hidden}`, color: l.color, indent: true });
@@ -2754,7 +3301,7 @@ class PerfCharts {
         const entries = drawn.lines.map(l => ({ l, v: d[l.key][s] })).filter(({ v }) => Number.isFinite(v));
         entries.sort((a, b) => b.v - a.v);
         /** @type {PerfHoverLine[]} */
-        const lines = [{ text: `Frame ${seq + 1}` }];
+        const lines = [{ text: capture.label(seq) }];
         for (const { l, v } of entries) {
             const delta = p >= 0 ? v - d[l.key][p] : 0;
             const change = Number.isFinite(delta) && delta !== 0 ? ` (${delta > 0 ? '+' : '−'}${drawn.format(Math.abs(delta))})` : '';
@@ -2767,8 +3314,8 @@ class PerfCharts {
     /**
      * @param {number} seq - A kept frame.
      * @param {PerfScriptLegend} legend - The script types with a band of their own.
-     * @returns {PerfHoverLine[]} The longest of the other script types in the frame, then how many
-     * more there were.
+     * @returns {PerfHoverLine[]} What the other scripts are made of in the frame: the longest of
+     * their types, how many more there were, and the calls of those that took too little to time.
      * @private
      */
     _otherScriptLines(seq, legend) {
@@ -2776,15 +3323,21 @@ class PerfCharts {
         const times = capture.scriptFigures(seq);
         if (!times) return [];
         const others = [];
+        // the calls of the types that read as no time, as the clock steps over them
+        let untimed = 0;
         for (let base = 0, id = 0; base < times.length; base += SCRIPT_STRIDE, id++) {
+            if (legend.colors.has(id)) continue;
             const v = times[base] + times[base + 1] + times[base + 2];
             const n = times[base + SCRIPT_CALLS] + times[base + SCRIPT_CALLS + 1] + times[base + SCRIPT_CALLS + 2];
-            if (v > 0 && !legend.colors.has(id)) others.push({ id, v, n });
+            if (v > 0) others.push({ id, v, n });
+            else untimed += n;
         }
         others.sort((a, b) => b.v - a.v);
         /** @type {PerfHoverLine[]} */
-        const lines = others.slice(0, HOVER_SCRIPT_TYPES).map(({ id, v, n }) => ({ text: `${capture.scriptNames[id]} ${formatMs(v)} · ${callCount(n)}`, indent: true, nested: true }));
-        if (others.length > HOVER_SCRIPT_TYPES) lines.push({ text: `… and ${others.length - HOVER_SCRIPT_TYPES} more`, indent: true, nested: true });
+        const lines = [{ text: 'made up of', indent: true, nested: true, muted: true }];
+        for (const { id, v, n } of others.slice(0, HOVER_SCRIPT_TYPES)) lines.push({ text: `${capture.scriptNames[id]} ${formatMs(v)} · ${callCount(n)}`, indent: true, nested: true });
+        if (others.length > HOVER_SCRIPT_TYPES) lines.push({ text: `and ${others.length - HOVER_SCRIPT_TYPES} more`, indent: true, nested: true, muted: true });
+        if (untimed > 0) lines.push({ text: `and ${callCount(untimed)} too short to time`, indent: true, nested: true, muted: true });
         return lines;
     }
 
@@ -2816,14 +3369,16 @@ class PerfCharts {
             box.style.display = 'none';
             return;
         }
-        const signature = lines.map(line => `${line.color ?? ''}|${line.indent ? 1 : 0}|${line.nested ? 1 : 0}|${line.strong ? 1 : 0}|${line.text}`).join('\n');
+        const signature = lines.map(line => `${line.color ?? ''}|${line.indent ? 1 : 0}|${line.nested ? 1 : 0}|${line.muted ? 1 : 0}|${line.strong ? 1 : 0}|${line.text}`).join('\n');
         if (signature !== this._hoverSignatures.get(box)) {
             this._hoverSignatures.set(box, signature);
             const doc = box.ownerDocument;
             box.textContent = '';
             for (const line of lines) {
                 const lineEl = doc.createElement('div');
-                lineEl.className = `pci-perf-hover-line${line.indent ? ' pci-indent' : ''}${line.nested ? ' pci-nested' : ''}${line.wrap ? ' pci-wrap' : ''}${line.strong ? ' pci-strong' : ''}`;
+                // a line too long for the box wraps, rather than running out of it
+                const wrap = line.wrap || line.text.length > HOVER_LINE_CHARS;
+                lineEl.className = `pci-perf-hover-line${line.indent ? ' pci-indent' : ''}${line.nested ? ' pci-nested' : ''}${line.muted ? ' pci-muted' : ''}${wrap ? ' pci-wrap' : ''}${line.strong ? ' pci-strong' : ''}`;
                 if (line.color) {
                     const swatch = doc.createElement('span');
                     swatch.className = 'pci-perf-swatch';
@@ -2855,6 +3410,10 @@ class PerfCharts {
         const hit = this._timelineHit(e);
         if (!hit) return [];
         const { lane, bars, hovered } = hit;
+        // the names of the lanes of the assets give the key to their colors
+        if (hit.x < this._gutter && /^asset\d+$/.test(lane.key)) {
+            return [{ text: 'Assets loading in the frame, cut to it, packed into lanes. The color is the kind of asset', wrap: true }, ...assetKey()];
+        }
         const average = this.range ? ', average per frame' : '';
         // the scripts list their types rather than the row
         if (hovered?.children?.length) {
@@ -2875,8 +3434,10 @@ class PerfCharts {
         const total = bars.reduce((sum, b) => sum + b.duration, 0);
         /** @type {PerfHoverLine[]} */
         const lines = [{ text: `${lane.title}${timed ? ` ${formatMs(total)}` : ''}${average}` }];
-        const sorted = lane.key === 'events' ? bars : [...bars].sort((a, b) => b.duration - a.duration);
-        const long = lane.key === 'types' || lane.key === 'gpu' || lane.key === 'gpuPasses';
+        // what loaded says what it was itself, and the moments list in their order
+        const loading = lane.key === 'milestones' || /^(?:asset|request)\d+$/.test(lane.key);
+        const sorted = lane.key === 'events' || lane.key === 'milestones' ? bars : [...bars].sort((a, b) => b.duration - a.duration);
+        const long = lane.key === 'types' || lane.key === 'gpu' || lane.key === 'gpuPasses' || loading;
         const shown = sorted.slice(0, long ? HOVER_SCRIPT_TYPES : TIMELINE_HOVER_BARS);
         // the hovered bar is listed even when the list is cut short
         if (hovered && !shown.includes(hovered)) shown[shown.length - 1] = hovered;
@@ -2884,10 +3445,11 @@ class PerfCharts {
             const time = b.duration > 0 ? ` ${formatMs(b.duration)}` : '';
             const at = Number.isFinite(b.start) ? ` at +${formatMs(b.start)}` : '';
             const calls = b.calls !== undefined ? ` · ${callCount(b.calls)}` : '';
-            lines.push({ text: `${b.label ?? b.name}${time}${at}${calls}`, color: b.color, indent: true, strong: b === hovered });
+            lines.push({ text: loading ? b.label : `${b.label ?? b.name}${time}${at}${calls}`, color: b.color, indent: true, strong: b === hovered });
         }
         if (sorted.length > shown.length) lines.push({ text: `… and ${sorted.length - shown.length} more`, indent: true });
         if (hovered?.script !== undefined) lines.push({ text: `Click to show ${hovered.name} on the Scripts tab` });
+        if (hovered?.asset !== undefined) lines.push({ text: `Click to show ${hovered.name} on the Assets tab` });
         if (hovered?.pass) lines.push({ text: `Click to show ${hovered.label ?? hovered.name} on the Frame graph tab` });
         if (lane.key === 'detail') {
             const scripted = bars.some(b => b.children);
@@ -2910,6 +3472,14 @@ class PerfCharts {
         // it opens shows: a press started on it would keep the pointer, so the menu got none
         if (e.button !== 0 || e.ctrlKey) return;
         const { x, row } = this._locate(e);
+        // the divider beside the names drags to make them wider or narrower
+        if (PerfCharts._onDivider(x)) {
+            this._canvas.setPointerCapture?.(e.pointerId);
+            this._press = { x, seq: -1, ranging: false, pointerId: e.pointerId, resize: true, clientX: e.clientX, gutter: this._gutter };
+            this._showHover(null);
+            this._updateCursor(e.shiftKey);
+            return;
+        }
         // a section's title, or the name beside an open chart, collapses or expands it
         const section = row?.section ?? (x < 0 && row?.chart !== undefined ? CHARTS[row.chart].key : null);
         if (section) {
@@ -2953,7 +3523,10 @@ class PerfCharts {
         if (x < 0) return;
         this._canvas.setPointerCapture?.(e.pointerId);
         this._press = { x, seq: this._seqAt(x), ranging: false, pointerId: e.pointerId };
+        // with Shift, zoomed in, the drag pans the view
+        if (e.shiftKey && this._view) Object.assign(this._press, { pan: true, from: this._layout.from, moved: false });
         this._showHover(null);
+        this._updateCursor(e.shiftKey);
     };
 
     /**
@@ -2963,6 +3536,27 @@ class PerfCharts {
     _onPointerMove = (e) => {
         const { x } = this._locate(e);
         const press = this._press;
+        this._pointerX = x;
+        this._watchKeys(true);
+        this._updateCursor(e.shiftKey);
+        this._setDividerHot(press?.resize || (!press && PerfCharts._onDivider(x)));
+        if (press?.resize) {
+            this.gutter = press.gutter + e.clientX - press.clientX;
+            return;
+        }
+        if (!press && PerfCharts._onDivider(x)) {
+            this._showHover(null);
+            return;
+        }
+        if (press?.pan) {
+            press.moved ||= Math.abs(x - press.x) > 4;
+            if (!press.moved) return;
+            const { span, plot } = this._layout;
+            const from = press.from - ((x - press.x) / plot) * span;
+            this._view = { from, span, follow: from + span >= this._capture.endPos };
+            this.invalidate();
+            return;
+        }
         if (press && (press.ranging || Math.abs(x - press.x) > 4)) {
             press.ranging = true;
             const capture = this._capture;
@@ -3011,8 +3605,26 @@ class PerfCharts {
     _onPointerUp = (e) => {
         const press = this._press;
         this._press = null;
+        this._updateCursor(e.shiftKey);
+        if (press?.resize) {
+            this.onCollapse();
+            return;
+        }
         if (!press || e.type === 'pointercancel') return;
+        // a drag that panned picks nothing; a Shift+click without moving still picks the frame
+        if (press.pan && press.moved) return;
         if (!press.ranging) {
+            // an asset of the Loading section shows on the Assets tab rather than picking a frame
+            const { x, y, row } = this._locate(e);
+            if (row?.loading === 'assets') {
+                const lane = Math.floor((y - row.top - 1) / (ASSET_LANE + 1));
+                const px = x + this._gutter;
+                const hit = this._loadingDrawn.assets?.find(item => item.lane === lane && px >= item.x0 - 1 && px <= item.x1 + 1);
+                if (hit && hit.load.id !== undefined) {
+                    this.onSelectAsset(hit.load.id);
+                    return;
+                }
+            }
             this.range = null;
             this.pick(this._pickAt(e));
         }
@@ -3035,8 +3647,77 @@ class PerfCharts {
     _onPointerLeave = () => {
         this._hover = -1;
         this._level = null;
+        this._pointerX = NaN;
+        this._watchKeys(false);
+        this._updateCursor(false);
+        this._setDividerHot(false);
         this._showHover(null);
         this._drawn.overlay = true;
+    };
+
+    /**
+     * Shows that a drag pans: a hand over the plot while Shift is held and the charts are zoomed
+     * in, closed while it pans.
+     *
+     * @param {boolean} shift - Whether Shift is held.
+     * @private
+     */
+    _updateCursor(shift) {
+        const press = this._press;
+        const cursor = press?.resize || (!press && PerfCharts._onDivider(this._pointerX)) ? 'col-resize' :
+            press?.pan ? 'grabbing' : shift && this._view && this._pointerX >= 0 ? 'grab' : '';
+        if (this._canvas.style.cursor !== cursor) this._canvas.style.cursor = cursor;
+        const time = this._timePress;
+        const timeCursor = time?.resize || (!time && PerfCharts._onDivider(this._timePointerX)) ? 'col-resize' :
+            time?.pan ? 'grabbing' : shift && this._timeView && this._timePointerX >= 0 ? 'grab' : this._timeCursor;
+        if (this._timeline.style.cursor !== timeCursor) this._timeline.style.cursor = timeCursor;
+    }
+
+    /**
+     * @param {number} x - A position across the charts or the timeline right of the names.
+     * @returns {boolean} Whether it is on the divider beside the names.
+     * @private
+     */
+    static _onDivider(x) {
+        return x >= -DIVIDER_REACH && x <= DIVIDER_REACH / 2;
+    }
+
+    /**
+     * Marks the divider beside the names as under the pointer or being dragged, or not.
+     *
+     * @param {boolean} hot - Whether it is.
+     * @private
+     */
+    _setDividerHot(hot) {
+        if (hot === this._dividerHot) return;
+        this._dividerHot = hot;
+        this._drawn.overlay = true;
+        this._drawn.timeline = true;
+    }
+
+    /**
+     * Follows the Shift key of the window the charts are in while the pointer is over them, so the
+     * cursor changes as Shift is pressed or let go without the pointer moving.
+     *
+     * @param {boolean} on - Whether to follow it.
+     * @private
+     */
+    _watchKeys(on) {
+        const view = on ? this._canvas.ownerDocument.defaultView : null;
+        if (view === this._keyView) return;
+        this._keyView?.removeEventListener('keydown', this._onKey);
+        this._keyView?.removeEventListener('keyup', this._onKey);
+        this._keyView = view;
+        view?.addEventListener('keydown', this._onKey);
+        view?.addEventListener('keyup', this._onKey);
+    }
+
+    /**
+     * @param {KeyboardEvent} e - The event.
+     * @private
+     */
+    _onKey = (e) => {
+        if (e.key === 'Shift') this._updateCursor(e.type === 'keydown');
     };
 
     /**
@@ -3059,18 +3740,18 @@ class PerfCharts {
         const pan = e.shiftKey ? e.deltaY : e.deltaX;
         if (Math.abs(pan) > Math.abs(e.shiftKey ? 0 : e.deltaY)) {
             const next = from + (pan / plot) * span;
-            this._view = { from: next, span, follow: next + span >= capture.end };
+            this._view = { from: next, span, follow: next + span >= capture.endPos };
         } else {
             const x = Math.max(0, this._locate(e).x);
             const anchor = from + (x / plot) * span;
-            const next = Math.max(MIN_ZOOM, Math.round(span * Math.exp(e.deltaY * 0.002)));
-            // zoomed back out to the whole capture: a short one is spread over the fewest frames
+            const next = Math.max(MIN_ZOOM, span * Math.exp(e.deltaY * 0.002));
+            // zoomed back out to the whole capture: a short one is spread over the shortest time
             // the charts show, so it can be zoomed into before it fills them
-            if (next >= Math.max(MIN_SPAN, capture.count)) {
+            if (next >= Math.max(MIN_SPAN, capture.endPos - capture.startPos)) {
                 this._view = null;
             } else {
                 const start = anchor - (x / plot) * next;
-                this._view = { from: start, span: next, follow: start + next >= capture.end };
+                this._view = { from: start, span: next, follow: start + next >= capture.endPos };
             }
         }
         this._showHover(null);
@@ -3089,9 +3770,73 @@ class PerfCharts {
      * @private
      */
     _onTimelineMove = (e) => {
-        this._renderHover(this._timelineHoverEl, this._timelineEl, this._timelineLines(e), e, true);
-        const hovered = this._timelineHit(e)?.hovered;
-        this._timeline.style.cursor = hovered?.script !== undefined || hovered?.pass ? 'pointer' : '';
+        const x = e.clientX - this._timeline.getBoundingClientRect().left - this._gutter;
+        const press = this._timePress;
+        this._timePointerX = x;
+        this._watchKeys(true);
+        this._setDividerHot(press?.resize || (!press && PerfCharts._onDivider(x)));
+        if (press?.resize) {
+            this.gutter = press.gutter + e.clientX - press.clientX;
+        } else if (press?.pan) {
+            press.moved ||= Math.abs(x - press.x) > 4;
+            const { span, plot } = this._timeLayout;
+            if (press.moved) this._scrollTimeTo(press.from - ((x - press.x) / plot) * span);
+        }
+        if (press || PerfCharts._onDivider(x)) {
+            this._renderHover(this._timelineHoverEl, this._timelineEl, [], null, true);
+        } else {
+            this._renderHover(this._timelineHoverEl, this._timelineEl, this._timelineLines(e), e, true);
+            const hovered = this._timelineHit(e)?.hovered;
+            this._timeCursor = this._onTimelineTitle(e) || hovered?.script !== undefined || hovered?.pass || hovered?.asset !== undefined ? 'pointer' : '';
+        }
+        this._updateCursor(e.shiftKey);
+    };
+
+    /**
+     * @param {MouseEvent} e - A pointer event on the timeline.
+     * @returns {boolean} Whether it is on the title of the timeline.
+     * @private
+     */
+    _onTimelineTitle(e) {
+        const rect = this._timeline.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        return y >= 0 && y < TIMELINE_TITLE - 2 && x >= 0 && x < this._timelineTitleEnd + 4;
+    }
+
+    /**
+     * A press on the divider beside the names drags it, and one with Shift while zoomed in pans.
+     *
+     * @param {PointerEvent} e - The event.
+     * @private
+     */
+    _onTimelineDown = (e) => {
+        this._timeDragged = false;
+        if (e.button !== 0 || e.ctrlKey) return;
+        const x = e.clientX - this._timeline.getBoundingClientRect().left - this._gutter;
+        if (PerfCharts._onDivider(x)) {
+            this._timePress = { x, pointerId: e.pointerId, resize: true, clientX: e.clientX, gutter: this._gutter };
+        } else if (e.shiftKey && this._timeView && x >= 0) {
+            this._timePress = { x, pointerId: e.pointerId, pan: true, from: this._timeLayout.from, moved: false };
+        } else {
+            return;
+        }
+        this._timeline.setPointerCapture?.(e.pointerId);
+        this._renderHover(this._timelineHoverEl, this._timelineEl, [], null, true);
+        this._updateCursor(e.shiftKey);
+    };
+
+    /**
+     * @param {PointerEvent} e - The event.
+     * @private
+     */
+    _onTimelineUp = (e) => {
+        const press = this._timePress;
+        this._timePress = null;
+        this._updateCursor(e.shiftKey);
+        if (!press) return;
+        this._timeDragged = press.resize || press.moved;
+        if (press.resize) this.onCollapse();
     };
 
     /**
@@ -3101,15 +3846,31 @@ class PerfCharts {
      * @private
      */
     _onTimelineClick = (e) => {
+        // the end of a drag clicks nothing
+        if (this._timeDragged) {
+            this._timeDragged = false;
+            return;
+        }
+        // the title collapses or expands the timeline
+        if (this._onTimelineTitle(e)) {
+            if (this.collapsed.has('timeline')) this.collapsed.delete('timeline');
+            else this.collapsed.add('timeline');
+            this._renderHover(this._timelineHoverEl, this._timelineEl, [], null, true);
+            this._drawn.timeline = true;
+            this.onCollapse();
+            return;
+        }
         const hovered = this._timelineHit(e)?.hovered;
         if (hovered?.script !== undefined) this.onSelectScript(hovered.script);
         else if (hovered?.pass) this.onSelectPass(hovered.pass);
+        else if (hovered?.asset !== undefined) this.onSelectAsset(hovered.asset);
     };
 
     /**
      * @param {MouseEvent} e - A pointer event on the frame timeline.
-     * @returns {{ lane: { key: string, title: string }, bars: PerfBar[], hovered: PerfBar|null }|null}
-     * The row under it, its bars and the bar under it, or null where there is no row with bars.
+     * @returns {{ lane: { key: string, title: string }, bars: PerfBar[], x: number, hovered: PerfBar|null }|null}
+     * The row under it, its bars, where across the timeline it is and the bar under it, or null
+     * where there is no row with bars.
      * @private
      */
     _timelineHit(e) {
@@ -3118,13 +3879,20 @@ class PerfCharts {
         const y = e.clientY - rect.top;
         const lane = this._lanes.find(l => y >= l.y - 1 && y < l.y + l.h + 1);
         if (!lane) return null;
-        const bars = this._bars.filter(b => b.lane === lane.key);
-        if (!bars.length) return null;
-        return { lane, bars, hovered: bars.find(b => x >= b.x0 && x < b.x1) ?? null };
+        const own = this._bars.filter(b => b.lane === lane.key);
+        if (!own.length) return null;
+        // the lanes of the assets, and of the requests, list together
+        const group = /^(asset|request)\d+$/.exec(lane.key)?.[1];
+        const bars = group ? this._bars.filter(b => b.lane.startsWith(group) && /\d$/.test(b.lane)) : own;
+        return { lane, bars, x, hovered: own.find(b => x >= b.x0 - (b.x1 - b.x0 < 3 ? 2 : 0) && x < b.x1 + (b.x1 - b.x0 < 3 ? 2 : 0)) ?? null };
     }
 
     /** @private */
     _onTimelineLeave = () => {
+        this._timePointerX = NaN;
+        this._watchKeys(false);
+        this._setDividerHot(false);
+        this._updateCursor(false);
         this._renderHover(this._timelineHoverEl, this._timelineEl, [], null, true);
     };
 }

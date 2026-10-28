@@ -3,7 +3,7 @@ import { EventHandler, GraphNode, NullGraphicsDevice, Script } from 'playcanvas'
 import { expect } from 'chai';
 
 import { Inspector } from '../src/inspector.js';
-import { PerfCapture } from '../src/perf-capture.js';
+import { PerfCapture, SCRIPT_STRIDE } from '../src/perf-capture.js';
 import { PerfCharts } from '../src/perf-chart.js';
 import { captureJson, frameJson, rangeJson, seriesRows, toCsv } from '../src/perf-copy.js';
 import {
@@ -44,7 +44,8 @@ function createApp(detailed = false) {
     });
     app.graphicsDevice = device;
     app.assets = new EventHandler();
-    app.frame = 0;
+    // an app that has run its first frames, so a recording begins with frames rather than its start
+    app.frame = 1;
     app.stats = {
         // every frame figure the engine publishes, zero until a frame sets it
         frame: Object.fromEntries([
@@ -149,6 +150,30 @@ function tick(app, { update = 2, render = 3, gap = 11, draws = 10, physics = -1,
     }
     app.fire('frameend');
     clock.time += gap;
+}
+
+/**
+ * Records four frames of an app loading two assets: a model that begins loading in the first
+ * frame and finishes in the third, its request told of by the browser only after that, and an
+ * image that fails in the fourth.
+ *
+ * @returns {{ app: any, capture: PerfCapture }} The app and the capture.
+ */
+function recordLoads() {
+    const app = createApp();
+    const capture = new PerfCapture(app);
+    capture.start();
+    const statue = { id: 7, name: 'statue.glb', type: 'container', getFileUrl: () => 'http://localhost/statue.glb' };
+    const missing = { id: 8, name: 'missing.png', type: 'texture', getFileUrl: () => 'http://localhost/missing.png' };
+    tick(app, { during: () => app.assets.fire('load:start', statue) });
+    tick(app, { during: () => app.assets.fire('load:start', missing) });
+    tick(app, { during: () => app.assets.fire('load', statue) });
+    /** @type {any} */ (capture)._addRequest({
+        name: 'http://localhost/statue.glb', initiatorType: 'fetch', startTime: 1005, responseEnd: 1030, responseStart: 1010, transferSize: 5000, encodedBodySize: 4800
+    });
+    tick(app, { during: () => app.assets.fire('error', 'not found', missing) });
+    tick(app);
+    return { app, capture };
 }
 
 describe('PerfCapture', function () {
@@ -386,8 +411,86 @@ describe('PerfCapture', function () {
         capture.start();
         tick(app, { during: () => app.assets.fire('load', { name: 'statue.glb' }) });
         tick(app);
-        expect(capture.events(0).map(event => event.name)).to.deep.equal(['statue.glb']);
-        expect(capture.events(1)).to.be.empty;
+        expect(capture.loads(0).map(load => load.name)).to.deep.equal(['statue.glb']);
+        expect(capture.loads(1)).to.be.empty;
+    });
+
+    it('begins with the start of the app when recording before its first frame', function () {
+        const app = createApp();
+        app.frame = 0;
+        const capture = new PerfCapture(app);
+        capture.start();
+        expect(capture.startedAtStartup).to.be.true;
+        // the first frame begins a second after the page opened
+        tick(app);
+        tick(app);
+        tick(app);
+        expect(capture.count).to.equal(3);
+        expect(capture.isStartup(0)).to.be.true;
+        expect(capture.get('width', 0)).to.equal(1000);
+        expect(capture.label(0)).to.equal('Startup');
+        expect(capture.label(1)).to.equal('Frame 1');
+        expect(capture.rangeLabel(0, 2)).to.equal('Startup to frame 2');
+        expect(capture.loads(0).map(load => load.name)).to.deep.equal(['First frame']);
+        // the first frame follows it on the time axis
+        expect(capture.get('pos', 1)).to.equal(1000);
+    });
+
+    it('begins with frames once the app has run one', function () {
+        const app = createApp();
+        const capture = new PerfCapture(app);
+        capture.start();
+        tick(app);
+        tick(app);
+        expect(capture.startedAtStartup).to.be.false;
+        expect(capture.isStartup(0)).to.be.false;
+        expect(capture.label(0)).to.equal('Frame 1');
+        expect(capture.rangeLabel(0, 0)).to.equal('Frames 1–1');
+    });
+
+    it('places the entries along their time, folding a long pause', function () {
+        const app = createApp();
+        const capture = new PerfCapture(app);
+        capture.start();
+        for (let i = 0; i < 3; i++) tick(app);
+        capture.stop();
+        clock.time += 5000;
+        capture.start();
+        tick(app);
+        tick(app);
+        expect([0, 1, 2].map(seq => capture.get('pos', seq))).to.deep.equal([0, 16, 282]);
+        // the pause of over five seconds is a quarter of a second on the axis, and kept as it was
+        expect(capture.get('gap', 2)).to.equal(5016);
+        expect(capture.posAt(1005)).to.equal(5);
+        expect(capture.posAt(1032 + 2508)).to.equal(157);
+        expect(capture.posAt(6048 + 5)).to.equal(287);
+        expect(capture.seqAtPos(-5)).to.equal(0);
+        expect(capture.seqAtPos(100)).to.equal(1);
+        expect(capture.seqAtPos(282)).to.equal(2);
+        expect(capture.endPos).to.equal(298);
+    });
+
+    it('keeps an asset in the frame it finished loading in, with the request of its file', function () {
+        const { capture } = recordLoads();
+        expect(capture.pendingLoads()).to.be.empty;
+        const asset = capture.loads(2).find(load => load.kind === 'asset');
+        expect(asset).to.include({ name: 'statue.glb', id: 7, type: 'container', start: 1000, end: 1032, netStart: 1005, netEnd: 1030, firstByte: 1010, bytes: 5000 });
+        // the request in the frame it ended in, though the browser told of it later
+        expect(capture.loads(1).map(load => [load.kind, load.name])).to.deep.equal([['request', 'statue.glb']]);
+        // and a failure in the frame it failed in
+        expect(capture.loads(3).find(load => load.kind === 'asset')).to.include({ name: 'missing.png', failed: true });
+    });
+
+    it('keeps an asset loading open until it ends', function () {
+        const app = createApp();
+        const capture = new PerfCapture(app);
+        capture.start();
+        tick(app, { during: () => app.assets.fire('load:start', { id: 3, name: 'big.sog', type: 'gsplat' }) });
+        tick(app);
+        expect(capture.pendingLoads().map(load => load.name)).to.deep.equal(['big.sog']);
+        expect(capture.loads(0)).to.be.empty;
+        capture.stop();
+        expect(capture.pendingLoads()).to.be.empty;
     });
 
     it('counts the shader compiles and links the device reports', function () {
@@ -445,6 +548,21 @@ describe('Performance model', function () {
         expect(eventLines(capture, 30, 'hitch')[0]).to.equal('65.0 ms, 3.9× the median frame of 16.7 ms');
     });
 
+    it('says whether the main thread held a hitch back', function () {
+        const gaps = new Array(40).fill(11.7);
+        gaps[10] = 60;
+        gaps[30] = 60;
+        const capture = /** @type {any} */ (record(gaps));
+        capture.supports = { ...capture.supports, longFrames: true };
+        // the browser reported its main thread busy through one of them
+        capture._addEventTo(capture.slot(10), { kind: 'long', name: 'enemyAi.update', start: capture.get('tick', 10), duration: 58 });
+        expect(eventLines(capture, 10, 'hitch')[1]).to.equal('Main thread blocked 58.0 ms, longest script enemyAi.update');
+        expect(eventLines(capture, 30, 'hitch')[1]).to.match(/^Main thread not blocked/);
+        // a browser that does not report it says nothing either way
+        capture.supports.longFrames = false;
+        expect(eventLines(capture, 30, 'hitch')).to.have.length(1);
+    });
+
     it('averages a range and takes its 95th percentile and largest', function () {
         const capture = record([5, 5, 5, 25]);
         const stats = rangeStats(capture, 'interval', 0, 3);
@@ -484,7 +602,6 @@ describe('Performance model', function () {
         tick(app);
         tick(app, {
             during: () => {
-                app.assets.fire('load', { name: 'statue.glb' });
                 app.graphicsDevice.textures.add({});
                 app.graphicsDevice.shaders.push({});
             }
@@ -493,10 +610,9 @@ describe('Performance model', function () {
         const bit = key => 1 << EVENT_KINDS.findIndex(kind => kind.key === key);
         expect(eventMask(capture, 0)).to.equal(0);
         const mask = eventMask(capture, 1);
-        expect(mask).to.equal(bit('asset') | bit('resource') | bit('compile'));
+        expect(mask).to.equal(bit('resource') | bit('compile'));
         expect(eventLines(capture, 1, 'resource')).to.deep.equal(['Textures 0 → 1 (+1)']);
         expect(eventLines(capture, 1, 'compile')).to.deep.equal(['Shaders 0 → 1 (+1)']);
-        expect(eventLines(capture, 1, 'asset')[0]).to.match(/^statue\.glb loaded at \+/);
 
         // a heap that shrinks by over a megabyte is a collection
         const d = capture.data;
@@ -506,16 +622,51 @@ describe('Performance model', function () {
         expect(eventLines(capture, 1, 'gc')[0]).to.match(/freed$/);
 
         const events = buildPerfModel({ capture, seq: 1, range: null, gpu }).find(section => section.key === 'events');
-        expect(events.rows.map(row => row.label)).to.deep.equal(['Shaders', 'Heap shrank', 'Resources', 'Assets']);
+        expect(events.rows.map(row => row.label)).to.deep.equal(['Shaders', 'Heap shrank', 'Resources']);
     });
 
     it('says which kinds of event the browser cannot report', function () {
         const capture = new PerfCapture(createApp());
         capture.supports = { longFrames: false, measures: true, heap: false };
-        expect(eventUnsupported(capture, 'long')).to.match(/long animation frames/);
+        expect(eventUnsupported(capture, 'long')).to.match(/main thread is blocked/);
         expect(eventUnsupported(capture, 'gc')).to.match(/Chromium/);
         expect(eventUnsupported(capture, 'marker')).to.equal('');
         expect(eventUnsupported(capture, 'resource')).to.equal('');
+    });
+
+    it('describes the start of the app: its length, what it loaded and its moments', function () {
+        const app = createApp();
+        app.frame = 0;
+        const capture = new PerfCapture(app);
+        capture.start();
+        const statue = { id: 7, name: 'statue.glb', type: 'container', getFileUrl: () => 'http://localhost/statue.glb' };
+        /** @type {any} */ (capture)._addRequest({
+            name: 'http://localhost/statue.glb', initiatorType: 'fetch', startTime: 1020, responseEnd: 1070, responseStart: 1030, transferSize: 0, encodedBodySize: 4800
+        });
+        app.assets.fire('load:start', statue);
+        clock.time += 100;
+        app.assets.fire('load', statue);
+        tick(app);
+        tick(app);
+        const sections = buildPerfModel({ capture, seq: 0, range: null, gpu });
+        expect(sections.map(section => section.key)).to.deep.equal(['frame', 'milestones', 'assets']);
+        const [startup, moments, assets] = sections;
+        expect(startup.title).to.equal('Startup');
+        expect(startup.rows.find(row => row.key === 'length').value.text).to.equal('1.10 s after the page opened');
+        expect(startup.rows.find(row => row.key === 'requests').value.text).to.equal('1 · 4.7 KB · 1 from the cache');
+        expect(startup.rows.find(row => row.key === 'assets').value.text).to.equal('1 loaded');
+        expect(moments.rows.map(row => [row.label, row.value.text])).to.deep.equal([['First frame', '1.10 s']]);
+        expect(assets.rows[0].label).to.equal('statue.glb');
+        expect(assets.rows[0].value.text).to.equal('container · 100.0 ms · request 50.0 ms · processing 30.0 ms · 4.7 KB, cached');
+    });
+
+    it('lists what loaded in a frame', function () {
+        const { capture } = recordLoads();
+        const sections = buildPerfModel({ capture, seq: 2, range: null, gpu });
+        expect(sections.map(section => section.key)).to.deep.equal(['frame', 'cpu', 'loading', 'gpu', 'work', 'memory', 'resources', 'events']);
+        const loading = sections.find(section => section.key === 'loading');
+        expect(loading.rows.map(row => row.label)).to.deep.equal(['Assets', 'statue.glb']);
+        expect(buildPerfModel({ capture, seq: 0, range: null, gpu }).some(section => section.key === 'loading')).to.be.false;
     });
 
     it('puts the figures of the selected range first', function () {
@@ -562,7 +713,7 @@ describe('Performance copies', function () {
         expect(frame.gpu).to.deep.equal({ frame: 6, passes: { Forward: 4, Compose: 2 }, passList: [{ name: 'Forward', time: 4 }, { name: 'Compose', time: 2 }] });
         expect(frame.memory.textures).to.equal(1000);
         expect(frame.draws).to.not.have.property('forward');
-        expect(frame.events[0]).to.include({ kind: 'asset', name: 'statue, "big".glb' });
+        expect(frame.loads[0]).to.include({ kind: 'asset', name: 'statue, "big".glb' });
         expect(/** @type {any} */ (frameJson(capture, 0))).to.not.have.property('gpu');
     });
 
@@ -579,19 +730,33 @@ describe('Performance copies', function () {
         expect(range.cpu.max).to.equal(9);
     });
 
+    it('copies what loaded in a frame, from when the frame began', function () {
+        const { capture } = recordLoads();
+        const frame = /** @type {any} */ (frameJson(capture, 2));
+        expect(frame.loads.length).to.equal(1);
+        const [load] = frame.loads;
+        expect(load).to.include({ kind: 'asset', name: 'statue.glb', type: 'container', start: -32, duration: 32, end: 0, bytes: 5000 });
+        expect(load.request).to.deep.equal({ start: -27, duration: 25, firstByte: 5 });
+        const rows = /** @type {any[]} */ (seriesRows(capture, 'loading', 0, 3));
+        expect(rows.map(row => [row.frame, row.kind, row.name])).to.deep.equal([[2, 'request', 'statue.glb'], [3, 'asset', 'statue.glb'], [4, 'asset', 'missing.png']]);
+        expect(rows[1]).to.include({ requestStart: -27, requestDuration: 25 });
+        expect(rows[2].failed).to.be.true;
+    });
+
     it('copies a series a row per frame, as JSON rows or as CSV', function () {
         const capture = record();
         const cpu = /** @type {any[]} */ (seriesRows(capture, 'cpu', 0, 2));
         expect(cpu.map(row => row.total)).to.deep.equal([5, 9, 5]);
         const gpu = /** @type {any[]} */ (seriesRows(capture, 'gpu', 0, 2));
         expect(gpu[1]).to.deep.equal({ frame: 2, gpu: 6, 'pass Forward': 4, 'pass Compose': 2 });
-        const events = /** @type {any[]} */ (seriesRows(capture, 'events', 0, 2));
-        expect(events.map(row => row.frame)).to.deep.equal([2]);
+        // the events series lists only the frames that had events, and these had none
+        expect(seriesRows(capture, 'events', 0, 2)).to.be.empty;
+        const loading = /** @type {any[]} */ (seriesRows(capture, 'loading', 0, 2));
         // every column any row has, and text quoted where it has to be
-        const csv = toCsv([...gpu, ...events]).split('\n');
-        expect(csv[0]).to.equal('frame,gpu,pass Forward,pass Compose,asset');
-        expect(csv[2]).to.equal('2,6,4,2,');
-        expect(csv[4]).to.match(/^2,,,,"statue, ""big"".glb loaded at \+/);
+        const csv = toCsv([...gpu, ...loading]).split('\n');
+        expect(csv[0]).to.equal('frame,gpu,pass Forward,pass Compose,kind,name,end');
+        expect(csv[2]).to.equal('2,6,4,2,,,');
+        expect(csv[4]).to.equal('2,,,,asset,"statue, ""big"".glb",0');
     });
 });
 
@@ -645,6 +810,48 @@ describe('Performance timeline', function () {
         charts.destroy();
     });
 
+    it('draws what loaded in a frame on lanes of its timeline', function () {
+        const { capture } = recordLoads();
+        const charts = new PerfCharts(document.createElement('div'), capture);
+        charts.pick(1);
+        const model = /** @type {any} */ (charts)._timelineModel();
+        // both assets were loading through the second frame, and the request ended in it
+        const loading = model.bars.filter(bar => /^(?:asset|request)\d$/.test(bar.lane));
+        expect(loading.map(bar => [bar.lane, bar.name, bar.start, bar.duration])).to.deep.equal([
+            ['asset0', 'statue.glb', 0, 16], ['asset1', 'missing.png', 0, 16], ['request0', 'statue.glb', 0, 14]
+        ]);
+        expect(loading[0].asset).to.equal(7);
+        charts.destroy();
+    });
+
+    it('shows the start of the app as long as it lasted', function () {
+        const app = createApp();
+        app.frame = 0;
+        const capture = new PerfCapture(app);
+        capture.start();
+        tick(app);
+        tick(app);
+        const charts = new PerfCharts(document.createElement('div'), capture);
+        charts.pick(0);
+        const model = /** @type {any} */ (charts)._timelineModel();
+        expect(model.title).to.equal('Startup');
+        expect(model.interval).to.equal(1000);
+        expect(model.bars.filter(bar => bar.lane === 'milestones').map(bar => [bar.name, bar.start])).to.deep.equal([['First frame', 1000]]);
+        charts.destroy();
+    });
+
+    it('lists what was loading over a span of the charts, by row', function () {
+        const { capture } = recordLoads();
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        const items = charts._loadingItems(0, 64);
+        expect(items.assets.map(item => item.load.name)).to.have.members(['statue.glb', 'missing.png']);
+        expect(items.requests.map(item => item.load.name)).to.deep.equal(['statue.glb']);
+        // a part of the axis before them has nothing
+        const none = charts._loadingItems(-50, -10);
+        expect(none.assets).to.be.empty;
+        charts.destroy();
+    });
+
     it('labels a bar with as much as fits', function () {
         // six pixels a letter
         const ctx = { measureText: text => ({ width: text.length * 6 }) };
@@ -654,6 +861,102 @@ describe('Performance timeline', function () {
         expect(fit('Render', '1.30 ms', 24)).to.equal('Ren…');
         expect(fit('Post update', '', 40)).to.equal('Post…');
         expect(fit('Render', '', 11)).to.equal('');
+        // a name in the gutter stops before the plot
+        const drawn = [];
+        const gutter = { ...ctx, fillText: (text, x) => drawn.push([text, x]) };
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), new PerfCapture(createApp())));
+        charts._gutterText(gutter, 'Index buffers', 23, 0);
+        charts._gutterText(gutter, 'Storage buffers', 23, 0);
+        expect(drawn).to.deep.equal([['Index buffers', 23], ['Storage buff…', 23]]);
+        // and fits whole once the names are made wider, within the least and the most they take
+        charts.gutter = 120;
+        charts._gutterText(gutter, 'Storage buffers', 23, 0);
+        expect(drawn[2]).to.deep.equal(['Storage buffers', 23]);
+        charts.gutter = 10;
+        expect(charts.gutter).to.equal(70);
+        charts.gutter = 1000;
+        expect(charts.gutter).to.equal(320);
+        charts.destroy();
+    });
+
+    it('pans the zoomed charts with a Shift+drag, showing a hand', function () {
+        const app = createApp();
+        const capture = new PerfCapture(app);
+        capture.start();
+        for (let i = 0; i < 400; i++) tick(app);
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        // zoomed into a second of the capture, drawn 300 pixels wide
+        charts._view = { from: 1000, span: 1000, follow: false };
+        Object.assign(charts._layout, { from: 1000, span: 1000, plot: 300 });
+        const event = (type, x, shiftKey = true) => ({ type, button: 0, ctrlKey: false, shiftKey, clientX: 108 + x, clientY: 10, pointerId: 1 });
+        charts._onPointerMove(event('pointermove', 200));
+        expect(charts._canvas.style.cursor).to.equal('grab');
+        charts._onPointerMove(event('pointermove', 200, false));
+        expect(charts._canvas.style.cursor).to.equal('');
+        const shown = charts.shown;
+        charts._onPointerDown(event('pointerdown', 200));
+        expect(charts._canvas.style.cursor).to.equal('grabbing');
+        // dragged left half the plot: the view moves on half its span
+        charts._onPointerMove(event('pointermove', 50));
+        expect(charts._view.from).to.equal(1500);
+        charts._onPointerUp(event('pointerup', 50));
+        expect(charts._canvas.style.cursor).to.equal('grab');
+        // a pan picks no frame and selects none
+        expect(charts.shown).to.equal(shown);
+        expect(charts.range).to.equal(null);
+        charts.destroy();
+    });
+
+    it('drags the divider beside the names to make them wider, and saves it', function () {
+        const capture = new PerfCapture(createApp());
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        let saved = 0;
+        charts.onCollapse = () => saved++;
+        const event = (type, clientX) => ({ type, button: 0, ctrlKey: false, shiftKey: false, clientX, clientY: 10, pointerId: 1 });
+        charts._onPointerMove(event('pointermove', 107));
+        expect(charts._canvas.style.cursor).to.equal('col-resize');
+        charts._onPointerDown(event('pointerdown', 107));
+        charts._onPointerMove(event('pointermove', 137));
+        expect(charts.gutter).to.equal(138);
+        // the scrollbars under the charts and the timeline start where the plot does
+        expect(charts._scrollbar.el.style.marginLeft).to.equal('146px');
+        charts._onPointerUp(event('pointerup', 137));
+        expect(saved).to.equal(1);
+        charts.destroy();
+    });
+
+    it('pans the zoomed frame timeline with a Shift+drag, which clicks nothing', function () {
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), new PerfCapture(createApp())));
+        // four milliseconds of a sixteen millisecond frame, drawn 200 pixels wide
+        charts._timeView = { from: 2, span: 4 };
+        Object.assign(charts._timeLayout, { from: 2, span: 4, length: 16, plot: 200 });
+        const event = (type, x) => ({ type, button: 0, ctrlKey: false, shiftKey: true, clientX: 108 + x, clientY: 40, pointerId: 1 });
+        charts._onTimelineDown(event('pointerdown', 100));
+        expect(charts._timeline.style.cursor).to.equal('grabbing');
+        charts._onTimelineMove(event('pointermove', 50));
+        expect(charts._timeView.from).to.equal(3);
+        charts._onTimelineUp(event('pointerup', 50));
+        expect(charts._timeline.style.cursor).to.equal('grab');
+        let selected = 0;
+        charts.onSelectScript = () => selected++;
+        charts._onTimelineClick(event('click', 50));
+        expect(charts._timeDragged).to.be.false;
+        expect(selected).to.equal(0);
+        charts.destroy();
+    });
+
+    it('collapses the frame timeline to its title', function () {
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), new PerfCapture(createApp())));
+        let saved = 0;
+        charts.onCollapse = () => saved++;
+        // the title as drawn, sixty pixels wide
+        charts._timelineTitleEnd = 60;
+        charts._onTimelineClick({ clientX: 20, clientY: 5 });
+        expect(charts.collapsed.has('timeline')).to.be.true;
+        charts._onTimelineClick({ clientX: 20, clientY: 5 });
+        expect(charts.collapsed.has('timeline')).to.be.false;
+        expect(saved).to.equal(2);
+        charts.destroy();
     });
 
     it('zooms into a capture shorter than the charts are wide', function () {
@@ -662,12 +965,18 @@ describe('Performance timeline', function () {
         capture.start();
         for (let i = 0; i < 51; i++) tick(app);
         const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
-        // the geometry a draw leaves: 50 frames spread over the 300 the charts show at least
-        Object.assign(charts._layout, { from: 0, span: 300, plot: 300 });
-        const wheel = deltaY => charts._onWheel({ deltaY, deltaX: 0, shiftKey: false, clientX: 96 + 30, clientY: 10, preventDefault() {} });
+        // the geometry a draw leaves: 50 frames of 16 ms spread over the 5 s the charts show at least
+        Object.assign(charts._layout, { from: 0, span: 5000, plot: 300 });
+        const wheel = deltaY => charts._onWheel({ deltaY, deltaX: 0, shiftKey: false, clientX: 108 + 30, clientY: 10, preventDefault() {} });
         wheel(-400);
         expect(charts._view).to.not.equal(null);
-        expect(charts._view.span).to.be.below(300);
+        expect(charts._view.span).to.be.below(5000);
+        // no closer than a quarter of a second
+        for (let i = 0; i < 20; i++) {
+            Object.assign(charts._layout, { from: charts._view.from, span: charts._view.span });
+            wheel(-400);
+        }
+        expect(charts._view.span).to.equal(250);
         // and back out to the whole capture
         Object.assign(charts._layout, { span: charts._view.span });
         wheel(4000);
@@ -977,8 +1286,16 @@ describe('Performance scripts', function () {
         charts.scriptRows = 10;
         const legend = charts._scriptLegend();
         expect(charts._otherScriptLines(2, legend).map(line => line.text)).to.deep.equal([
-            'script5 0.06 ms · 1 call', 'script4 0.05 ms · 1 call', 'script3 0.04 ms · 1 call', 'script2 0.03 ms · 1 call', 'script1 0.02 ms · 1 call'
+            'made up of', 'script5 0.06 ms · 1 call', 'script4 0.05 ms · 1 call', 'script3 0.04 ms · 1 call', 'script2 0.03 ms · 1 call', 'script1 0.02 ms · 1 call'
         ]);
+        // a type whose calls read as no time, as the clock stepped over them, is counted apart
+        const figures = capture.scriptFigures(2);
+        const base = capture.scriptNames.indexOf('script1') * SCRIPT_STRIDE;
+        figures.fill(0, base, base + 3);
+        const lines = charts._otherScriptLines(2, legend);
+        expect(lines.map(line => line.text).slice(-2)).to.deep.equal(['script2 0.03 ms · 1 call', 'and 1 call too short to time']);
+        expect(lines.at(-1).muted).to.be.true;
+        expect(lines[1].muted).to.be.undefined;
         charts.destroy();
     });
 });
@@ -993,6 +1310,7 @@ describe('Inspector Performance tab', function () {
         app.scene = Object.assign(new EventHandler(), { immediate: {}, defaultDrawLayer: null });
         app.systems = {};
         app.stats = createApp().stats;
+        app.frame = 1;
         app.timeScale = 1;
         app.root = new GraphNode('root');
         app.assets = new EventHandler();

@@ -3,9 +3,9 @@
 /**
  * @typedef {object} PerfEvent
  * @ignore
- * @property {'asset'|'long'|'marker'} kind - What happened: an asset finished loading, the browser
- * reported a long animation frame, or the app measured a span with `performance.measure`.
- * @property {string} name - What it was: the asset, the script that ran longest, the measure.
+ * @property {'long'|'marker'} kind - What happened: the browser reported a long animation frame,
+ * or the app measured a span with `performance.measure`.
+ * @property {string} name - What it was: the script that ran longest, or the measure.
  * @property {number} start - When it started, as a `performance.now()` time.
  * @property {number} duration - How long it took in milliseconds, zero for an instant.
  * @property {string} [detail] - More about it, such as the blocking time of a long frame.
@@ -24,6 +24,27 @@
  * @property {number} updateCalls - How many times its update was called, once an instance.
  * @property {number} postCalls - How many times its post-update was called.
  * @property {number} initCalls - How many times it was initialized, post-initialized or swapped.
+ */
+
+/**
+ * @typedef {object} PerfLoad
+ * @ignore
+ * @property {'asset'|'request'|'milestone'} kind - What it is: an asset loading, a request the
+ * page made, or a moment of the app or the page, such as its first paint.
+ * @property {string} name - The asset, the file requested, or the moment.
+ * @property {number} start - When it began, as a `performance.now()` time; NaN for an asset that
+ * began loading before recording did.
+ * @property {number} end - When it ended; the same as its start for a moment.
+ * @property {string} [type] - The type of an asset.
+ * @property {number} [id] - The id of an asset.
+ * @property {boolean} [failed] - Whether an asset failed to load.
+ * @property {number} [netStart] - When the request of an asset or a request began on the network.
+ * @property {number} [netEnd] - When its last byte arrived.
+ * @property {number} [firstByte] - When its first byte arrived.
+ * @property {number} [bytes] - Its size over the network, the size of the file where it came
+ * from the cache.
+ * @property {boolean} [cached] - Whether it came from the cache.
+ * @property {string} [url] - The file requested.
  */
 
 /**
@@ -66,6 +87,19 @@ const PASS_MATCH_SHARE = 0.6;
 
 // the events kept per frame, so an app measuring heavily cannot grow a frame without bound
 const MAX_FRAME_EVENTS = 64;
+
+// the loads kept per entry: a startup can make hundreds of requests
+const MAX_ENTRY_LOADS = 4096;
+
+// a time between two entries longer than this, in milliseconds, as between two recordings, is
+// folded to FOLDED_GAP on the time axis, so it does not squeeze everything else
+const GAP_FOLD = 1000;
+const FOLDED_GAP = 250;
+
+// the kinds of entry of the capture: a frame, or the start of the app, from the page opening to
+// its first frame
+const ENTRY_FRAME = 0;
+const ENTRY_STARTUP = 1;
 
 // the figures kept per script type in a frame: its own time in its update, its post-update and its
 // initializing; how many times each was called, from SCRIPT_CALLS on; and from SCRIPT_ORDER on, the
@@ -117,7 +151,10 @@ const CHANNELS = [
     // counts as the inspector's. The CPU chart stacks the first two as Scripts, and the
     // post-update without them
     'scripts', 'scriptsUpdate', 'scriptsUpdateStart', 'scriptsPost', 'scriptsPostStart', 'scriptsTotal',
-    'scriptsInit', 'scriptCalls', 'scriptCost', 'cpuPost'
+    'scriptsInit', 'scriptCalls', 'scriptCost', 'cpuPost',
+    // the entry on the time axis: what it is, where it starts and how wide it is there, in
+    // milliseconds, and the time before it that is folded away
+    'kind', 'pos', 'width', 'gap'
 ];
 
 // the channels of the scripts, NaN for a frame they were not timed in
@@ -138,6 +175,31 @@ const addBucket = (bucket) => {
 
 // the events of the many frames without any, shared
 const NO_EVENTS = Object.freeze(/** @type {PerfEvent[]} */ ([]));
+
+// the loads of the many entries without any, shared
+const NO_LOADS = Object.freeze(/** @type {PerfLoad[]} */ ([]));
+
+/**
+ * @param {string|null} url - A URL, relative to the page or absolute.
+ * @returns {string|null} The URL absolute, as the browser names its requests.
+ */
+function absoluteUrl(url) {
+    if (!url) return null;
+    try {
+        return new URL(url, typeof document !== 'undefined' ? document.baseURI : undefined).href;
+    } catch (e) {
+        return url;
+    }
+}
+
+/**
+ * @param {string} url - An absolute URL.
+ * @returns {string} The file it names, without the folders and the query.
+ */
+function fileName(url) {
+    const path = url.split(/[?#]/)[0];
+    return decodeURIComponent(path.slice(path.lastIndexOf('/') + 1)) || path;
+}
 
 /**
  * @param {GraphicsDevice} device - The device.
@@ -408,6 +470,49 @@ class PerfCapture {
     _events = [];
 
     /**
+     * The loads of each slot, those that ended in its entry, null for the many without any.
+     *
+     * @type {(PerfLoad[]|null)[]}
+     * @private
+     */
+    _loads = [];
+
+    /**
+     * The assets loading, by id, from when they began: they go to the entry they end in.
+     *
+     * @type {Map<number, PerfLoad>}
+     * @private
+     */
+    _pending = new Map();
+
+    /**
+     * Whether the entry being recorded is the start of the app: the inspector began recording
+     * before the app ran its first frame.
+     *
+     * @private
+     */
+    _startup = false;
+
+    /**
+     * The latest request of each file, by URL, and the assets that ended loading before the
+     * browser reported the request of their file, which it does a little later: each is linked
+     * to the other as the second of them comes.
+     *
+     * @private
+     */
+    _requests = /** @type {Map<string, PerfLoad>} */ (new Map());
+
+    /** @private */
+    _awaitingRequest = /** @type {Map<string, PerfLoad>} */ (new Map());
+
+    /**
+     * Whether the capture began with the start of the app, so its frames count from the one after.
+     *
+     * @type {boolean}
+     */
+    startedAtStartup = false;
+
+    /**
      * The slot the GPU timings being taken go to.
      *
      * @private
@@ -601,13 +706,24 @@ class PerfCapture {
 
         app.on('frameupdate', this._onFrameUpdate, this);
         app.on('frameend', this._onFrameEnd, this);
+        app.on('preload:start', this._onPreloadStart, this);
+        app.on('preload:end', this._onPreloadEnd, this);
+        app.on('start', this._onAppStart, this);
+        app.assets?.on('load:start', this._onAssetLoadStart, this);
         app.assets?.on('load', this._onAssetLoad, this);
+        app.assets?.on('error', this._onAssetError, this);
         device.on('shader:compile:start', this._onCompileStart, this);
         device.on('shader:compile:end', this._onCompileEnd, this);
         device.on('shader:link:start', this._onLinkStart, this);
         device.on('shader:link:end', this._onLinkEnd, this);
-        this._observe('long-animation-frame', this._onLongFrames);
+        // recording from before the app's first frame records its start too, as an entry of its own
+        const startup = this._end === 0 && !(app.frame > 0);
+        if (startup) this._beginStartup();
+        // what the browser kept from before then only for the start of the app
+        this._observe('long-animation-frame', this._onLongFrames, startup);
         this._observe('measure', this._onMeasures);
+        this._observe('resource', this._onResources);
+        this._observe('paint', this._onPaints, startup);
         if (this._timeScripts) this._hookScripts();
     }
 
@@ -622,7 +738,12 @@ class PerfCapture {
         const device = app.graphicsDevice;
         app.off('frameupdate', this._onFrameUpdate, this);
         app.off('frameend', this._onFrameEnd, this);
+        app.off('preload:start', this._onPreloadStart, this);
+        app.off('preload:end', this._onPreloadEnd, this);
+        app.off('start', this._onAppStart, this);
+        app.assets?.off('load:start', this._onAssetLoadStart, this);
         app.assets?.off('load', this._onAssetLoad, this);
+        app.assets?.off('error', this._onAssetError, this);
         device.off('shader:compile:start', this._onCompileStart, this);
         device.off('shader:compile:end', this._onCompileEnd, this);
         device.off('shader:link:start', this._onLinkStart, this);
@@ -630,6 +751,10 @@ class PerfCapture {
         for (const observer of this._observers) observer.disconnect();
         this._observers.length = 0;
         this._unhookScripts();
+        this._startup = false;
+        this._pending.clear();
+        this._requests.clear();
+        this._awaitingRequest.clear();
         this.version++;
     }
 
@@ -638,6 +763,7 @@ class PerfCapture {
      */
     clear() {
         this._end = 0;
+        this.startedAtStartup = false;
         this._begun = false;
         this._gpuSeen = -1;
         this.version++;
@@ -763,6 +889,121 @@ class PerfCapture {
     }
 
     /**
+     * @param {number} seq - The sequence number of a kept entry.
+     * @returns {readonly PerfLoad[]} What finished loading in the entry, and the moments in it.
+     */
+    loads(seq) {
+        return this._loads[seq % this._slots] ?? NO_LOADS;
+    }
+
+    /**
+     * @returns {PerfLoad[]} The assets loading now, which have not ended yet.
+     */
+    pendingLoads() {
+        return [...this._pending.values()];
+    }
+
+    /**
+     * @param {number} seq - The sequence number of an entry.
+     * @returns {number} The number of the frame it is, counting from 1: from the frame after the
+     * start of the app, where the capture began with it. It stays as frames make way.
+     */
+    frameNumber(seq) {
+        return this.startedAtStartup ? seq : seq + 1;
+    }
+
+    /**
+     * @param {number} seq - The sequence number of a kept entry.
+     * @returns {string} What it is called: Startup, or Frame and its number.
+     */
+    label(seq) {
+        return this.isStartup(seq) ? 'Startup' : `Frame ${this.frameNumber(seq)}`;
+    }
+
+    /**
+     * @param {number} from - The first kept entry.
+     * @param {number} to - The last, inclusive.
+     * @returns {string} What they are called together, as Frames 3–40, or Startup to frame 40.
+     */
+    rangeLabel(from, to) {
+        return this.isStartup(from) ? `Startup to frame ${this.frameNumber(to)}` : `Frames ${this.frameNumber(from)}–${this.frameNumber(to)}`;
+    }
+
+    /**
+     * @param {number} seq - The sequence number of a kept entry.
+     * @returns {boolean} Whether it is the start of the app rather than a frame.
+     */
+    isStartup(seq) {
+        return this.data.kind[seq % this._slots] === ENTRY_STARTUP;
+    }
+
+    /**
+     * Where the kept entries begin on the time axis, in milliseconds.
+     *
+     * @type {number}
+     */
+    get startPos() {
+        return this.count ? this.data.pos[this.first % this._slots] : 0;
+    }
+
+    /**
+     * Where the kept entries end on the time axis, in milliseconds.
+     *
+     * @type {number}
+     */
+    get endPos() {
+        if (!this.count) return 0;
+        const slot = (this._end - 1) % this._slots;
+        return this.data.pos[slot] + this.data.width[slot];
+    }
+
+    /**
+     * @param {number} pos - A place on the time axis.
+     * @returns {number} The kept entry there or before it, the first one before them all, or -1
+     * while none is kept.
+     */
+    seqAtPos(pos) {
+        if (!this.count) return -1;
+        const posRing = this.data.pos;
+        let lo = this.first;
+        let hi = this._end - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (posRing[mid % this._slots] <= pos) lo = mid;
+            else hi = mid - 1;
+        }
+        return lo;
+    }
+
+    /**
+     * @param {number} time - A `performance.now()` time.
+     * @returns {number} Where it is on the time axis: within the entry it falls in, in proportion
+     * across a folded gap, and before the first kept entry at its start.
+     */
+    posAt(time) {
+        if (!this.count) return 0;
+        const d = this.data;
+        const slots = this._slots;
+        let lo = this.first;
+        let hi = this._end - 1;
+        if (time < d.tick[lo % slots]) return d.pos[lo % slots];
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (d.tick[mid % slots] <= time) lo = mid;
+            else hi = mid - 1;
+        }
+        const slot = lo % slots;
+        const into = time - d.tick[slot];
+        const width = d.width[slot];
+        if (into <= width || lo === this._end - 1) return d.pos[slot] + into;
+        // in the gap before the next entry, folded on the axis
+        const next = (lo + 1) % slots;
+        const realGap = d.tick[next] - d.tick[slot] - width;
+        const shownGap = d.pos[next] - d.pos[slot] - width;
+        return d.pos[slot] + width + (realGap > 0 ? ((into - width) / realGap) * shownGap : 0);
+    }
+
+    /**
      * Counts time the inspector spent inside the frame being recorded, so it can be told apart from
      * the app's own.
      *
@@ -780,12 +1021,13 @@ class PerfCapture {
     /**
      * @param {string} type - A performance entry type.
      * @param {(list: PerformanceObserverEntryList) => void} callback - Takes the entries.
+     * @param {boolean} [buffered] - Whether to take the entries the browser kept from before too.
      * @private
      */
-    _observe(type, callback) {
+    _observe(type, callback, buffered = false) {
         if (!observable(type)) return;
         const observer = new PerformanceObserver(callback);
-        observer.observe({ type, buffered: false });
+        observer.observe({ type, buffered });
         this._observers.push(observer);
     }
 
@@ -797,9 +1039,67 @@ class PerfCapture {
      */
     _onFrameUpdate() {
         const now = performance.now();
-        if (this._begun && this._ended) this._complete(now);
+        if (this._startup) {
+            // the moment that ends the start of the app, kept with it
+            this._addMilestone('First frame', now);
+            this._endStartup(now);
+        } else if (this._begun && this._ended) {
+            this._complete(now);
+        }
         this._resolveGpu();
         this._begin(now);
+    }
+
+    /**
+     * Begins the entry of the start of the app, from when the page opened. Takes what the browser
+     * kept from before recording began: the requests of the page and its milestones.
+     *
+     * @private
+     */
+    _beginStartup() {
+        const slot = this._end % this._slots;
+        const data = this.data;
+        for (const key of CHANNELS) data[key][slot] = NaN;
+        data.kind[slot] = ENTRY_STARTUP;
+        data.tick[slot] = 0;
+        data.pos[slot] = 0;
+        data.gap[slot] = 0;
+        data.compiles[slot] = 0;
+        data.compileTime[slot] = 0;
+        data.inspector[slot] = 0;
+        (this._passFigures[slot] ??= []);
+        this._passCounts[slot] = 0;
+        this._events[slot] = null;
+        this._loads[slot] = null;
+        this._startup = true;
+        this.startedAtStartup = true;
+        this._begun = true;
+        this._ended = false;
+
+        if (typeof performance.getEntriesByType === 'function') {
+            for (const entry of performance.getEntriesByType('resource')) this._addRequest(entry);
+            const page = /** @type {any} */ (performance.getEntriesByType('navigation')[0]);
+            if (page) {
+                for (const [name, time] of [['Page received', page.responseEnd], ['DOM interactive', page.domInteractive], ['DOM ready', page.domContentLoadedEventEnd], ['Page load', page.loadEventEnd]]) {
+                    if (time > 0) this._addMilestone(name, time);
+                }
+            }
+        }
+        this.version++;
+    }
+
+    /**
+     * Ends the entry of the start of the app, as its first frame begins.
+     *
+     * @param {number} now - When the first frame began.
+     * @private
+     */
+    _endStartup(now) {
+        const slot = this._end % this._slots;
+        this.data.width[slot] = now;
+        this._startup = false;
+        this._end++;
+        this.version++;
     }
 
     /**
@@ -819,6 +1119,9 @@ class PerfCapture {
         this._passFigures[slot] ??= [];
         this._passCounts[slot] = 0;
         this._events[slot] = null;
+        this._loads[slot] = null;
+        data.kind[slot] = ENTRY_FRAME;
+        data.width[slot] = NaN;
         const scripts = this._unhook ? 0 : NaN;
         for (const key of SCRIPT_CHANNELS) data[key][slot] = scripts;
         data.scriptsUpdateStart[slot] = NaN;
@@ -927,6 +1230,17 @@ class PerfCapture {
         const slot = this._end % this._slots;
 
         data.interval[slot] = now - data.tick[slot];
+        // on the time axis, after the entry before it, with a long time between them folded
+        data.width[slot] = data.interval[slot];
+        if (this.has(this._end - 1)) {
+            const prev = (this._end - 1) % this._slots;
+            const gap = Math.max(0, data.tick[slot] - data.tick[prev] - data.width[prev]);
+            data.gap[slot] = gap > GAP_FOLD ? gap : 0;
+            data.pos[slot] = data.pos[prev] + data.width[prev] + (gap > GAP_FOLD ? FOLDED_GAP : gap);
+        } else {
+            data.gap[slot] = 0;
+            data.pos[slot] = 0;
+        }
         data.draws[slot] = drawCalls?.total ?? NaN;
         data.dispatches[slot] = frame.computeDispatches ?? NaN;
         data.computePasses[slot] = frame.computePasses ?? NaN;
@@ -1309,9 +1623,17 @@ class PerfCapture {
         }
         for (let s = this._end - 1; s >= this.first; s--) {
             const slot = s % this._slots;
-            if (time >= data.tick[slot]) return time < data.tick[slot] + data.interval[slot] ? slot : -1;
+            if (time >= data.tick[slot]) return time < data.tick[slot] + data.width[slot] ? slot : -1;
         }
         return -1;
+    }
+
+    /**
+     * @param {Asset} asset - An asset that began loading.
+     * @private
+     */
+    _onAssetLoadStart(asset) {
+        this._pending.set(asset.id, { kind: 'asset', name: asset.name, type: asset.type, id: asset.id, start: performance.now(), end: NaN });
     }
 
     /**
@@ -1319,7 +1641,145 @@ class PerfCapture {
      * @private
      */
     _onAssetLoad(asset) {
-        this._addEvent({ kind: 'asset', name: asset.name, start: performance.now(), duration: 0 });
+        this._endAsset(asset, performance.now(), false);
+    }
+
+    /**
+     * @param {*} err - The error.
+     * @param {Asset} asset - An asset that failed to load.
+     * @private
+     */
+    _onAssetError(err, asset) {
+        if (asset) this._endAsset(asset, performance.now(), true);
+    }
+
+    /**
+     * Adds an asset that ended loading to the entry it ended in, with the request of its file
+     * where the browser kept it: how long the network took, and so how long the asset took after.
+     *
+     * @param {Asset} asset - The asset.
+     * @param {number} end - When it ended.
+     * @param {boolean} failed - Whether it failed.
+     * @private
+     */
+    _endAsset(asset, end, failed) {
+        const pending = this._pending.get(asset.id);
+        this._pending.delete(asset.id);
+        /** @type {PerfLoad} */
+        const load = pending ?? { kind: 'asset', name: asset.name, type: asset.type, id: asset.id, start: NaN, end };
+        load.end = end;
+        if (failed) load.failed = true;
+        const url = absoluteUrl(/** @type {any} */ (asset).getFileUrl?.() ?? null);
+        if (url) {
+            load.url = url;
+            const request = this._requests.get(url);
+            if (request && request.end <= end + 1) PerfCapture._linkRequest(load, request);
+            else this._awaitingRequest.set(url, load);
+        }
+        this._addLoad(load);
+    }
+
+    /**
+     * @param {PerfLoad} asset - An asset load.
+     * @param {PerfLoad} request - The request of its file.
+     * @private
+     */
+    static _linkRequest(asset, request) {
+        asset.netStart = request.netStart;
+        asset.netEnd = request.netEnd;
+        asset.firstByte = request.firstByte;
+        asset.bytes = request.bytes;
+        asset.cached = request.cached;
+    }
+
+    /**
+     * @param {string} name - A moment of the app or the page.
+     * @param {number} time - When it was.
+     * @private
+     */
+    _addMilestone(name, time) {
+        this._addLoad({ kind: 'milestone', name, start: time, end: time });
+    }
+
+    /**
+     * Adds a load to the entry it ended in, where it is kept.
+     *
+     * @param {PerfLoad} load - The load.
+     * @private
+     */
+    _addLoad(load) {
+        const slot = this._slotAt(load.end);
+        if (slot < 0) return;
+        const loads = (this._loads[slot] ??= []);
+        if (loads.length < MAX_ENTRY_LOADS) loads.push(load);
+        this.version++;
+    }
+
+    /**
+     * @param {any} entry - A request the browser timed.
+     * @private
+     */
+    _addRequest(entry) {
+        /** @type {PerfLoad} */
+        const request = {
+            kind: 'request',
+            name: fileName(entry.name),
+            url: entry.name,
+            type: entry.initiatorType,
+            start: entry.startTime,
+            end: entry.responseEnd,
+            netStart: entry.startTime,
+            netEnd: entry.responseEnd,
+            firstByte: entry.responseStart,
+            bytes: entry.transferSize || entry.encodedBodySize || 0,
+            cached: entry.transferSize === 0 && entry.encodedBodySize > 0
+        };
+        this._addLoad(request);
+        // the asset of the file, if it ended loading first; the maps keep the recent ones only
+        const asset = this._awaitingRequest.get(entry.name);
+        if (asset) {
+            PerfCapture._linkRequest(asset, request);
+            this._awaitingRequest.delete(entry.name);
+            this.version++;
+        }
+        this._requests.set(entry.name, request);
+        for (const map of [this._requests, this._awaitingRequest]) {
+            if (map.size > MAX_ENTRY_LOADS) map.delete(map.keys().next().value);
+        }
+    }
+
+    /**
+     * @param {PerformanceObserverEntryList} list - The requests the browser timed.
+     * @private
+     */
+    _onResources = (list) => {
+        for (const entry of list.getEntries()) this._addRequest(entry);
+    };
+
+    /**
+     * @param {PerformanceObserverEntryList} list - The paints the browser timed: its first paint and
+     * its first paint of content.
+     * @private
+     */
+    _onPaints = (list) => {
+        for (const entry of list.getEntries()) {
+            this._addMilestone(entry.name === 'first-contentful-paint' ? 'First content paint' : entry.name === 'first-paint' ? 'First paint' : entry.name, entry.startTime);
+        }
+    };
+
+    /** @private */
+    _onPreloadStart() {
+        this._addMilestone('Preload start', performance.now());
+    }
+
+    /** @private */
+    _onPreloadEnd() {
+        this._addMilestone('Preload end', performance.now());
+    }
+
+    /** @private */
+    _onAppStart() {
+        this._addMilestone('App start', performance.now());
     }
 
     /**
@@ -1386,13 +1846,18 @@ class PerfCapture {
             const data = this.data;
             const frames = this._begun ? [this._end] : [];
             for (let s = this._end - 1; s >= this.first && data.tick[s % this._slots] >= start; s--) frames.push(s);
+            let added = false;
             for (const seq of frames) {
                 const slot = seq % this._slots;
                 const tick = data.tick[slot];
                 if (tick >= start && tick <= start + entry.duration) {
                     this._addEventTo(slot, { kind: 'long', name, start, duration: entry.duration, detail });
+                    added = true;
                 }
             }
+            // before the first frame, the start of the app has it
+            const slot = this._slotAt(start);
+            if (!added && slot >= 0 && data.kind[slot] === ENTRY_STARTUP) this._addEventTo(slot, { kind: 'long', name, start, duration: entry.duration, detail });
         }
     };
 
@@ -1410,4 +1875,4 @@ class PerfCapture {
     };
 }
 
-export { CAPTURE_FRAMES, CHANNELS, PerfCapture, SCRIPT_CALLS, SCRIPT_ORDER, SCRIPT_STRIDE };
+export { CAPTURE_FRAMES, CHANNELS, ENTRY_STARTUP, PerfCapture, SCRIPT_CALLS, SCRIPT_ORDER, SCRIPT_STRIDE };
