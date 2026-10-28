@@ -625,6 +625,25 @@ describe('Performance model', function () {
         expect(events.rows.map(row => row.label)).to.deep.equal(['Shaders', 'Heap shrank', 'Resources']);
     });
 
+    it('compares the first frame with nothing, as the start of the app before it has no figures', function () {
+        const app = createApp();
+        app.frame = 0;
+        const capture = new PerfCapture(app);
+        capture.start();
+        // the textures the app made while it started
+        app.graphicsDevice.textures.add({});
+        app.graphicsDevice.textures.add({});
+        tick(app);
+        tick(app);
+        tick(app);
+        const bit = key => 1 << EVENT_KINDS.findIndex(kind => kind.key === key);
+        expect(capture.isStartup(0)).to.be.true;
+        expect(eventMask(capture, 1) & bit('resource')).to.equal(0);
+        expect(eventLines(capture, 1, 'resource')).to.be.empty;
+        const resources = buildPerfModel({ capture, seq: 1, range: null, gpu }).find(section => section.key === 'resources');
+        expect(resources.rows.find(row => row.key === 'textures').value.text).to.equal('2');
+    });
+
     it('says which kinds of event the browser cannot report', function () {
         const capture = new PerfCapture(createApp());
         capture.supports = { longFrames: false, measures: true, heap: false };
@@ -1296,6 +1315,140 @@ describe('Performance scripts', function () {
         expect(lines.map(line => line.text).slice(-2)).to.deep.equal(['script2 0.03 ms · 1 call', 'and 1 call too short to time']);
         expect(lines.at(-1).muted).to.be.true;
         expect(lines[1].muted).to.be.undefined;
+        charts.destroy();
+    });
+});
+
+describe('Performance counters, batching and lightmaps', function () {
+    beforeEach(function () {
+        jsdomSetup();
+        clock.install();
+    });
+    afterEach(function () {
+        clock.uninstall();
+        jsdomTeardown();
+    });
+
+    const gpu = { supported: true, enabled: false, enable: () => {} };
+
+    /**
+     * @returns {{ app: any, capture: PerfCapture }} Three frames of an app counting enemies from
+     * the second and its AI time in the first two, batching each frame and creating batches in the
+     * second, and baking lightmaps in the third.
+     */
+    function record() {
+        const app = createApp(true);
+        app.stats.user = new Map();
+        app._batcher = { _stats: { createTime: 0, updateLastFrameTime: 0 } };
+        app.lightmapper = { stats: {} };
+        const capture = new PerfCapture(app);
+        capture.start();
+        const frames = [
+            () => app.stats.user.set('ai', 0.25),
+            () => {
+                app.stats.user.set('enemies', 12);
+                app.stats.user.set('ai', 1.5);
+                app._batcher._stats.createTime += 5;
+            },
+            () => {
+                app.stats.user.delete('ai');
+                const stats = { lightmapCount: 3, renderPasses: 9, shadowMapTime: 20, forwardTime: 60, fboTime: 4, shadersLinked: 2, compileTime: 30 };
+                app.graphicsDevice.fire('lightmapper:start', { timestamp: clock.time });
+                app.graphicsDevice.fire('lightmapper:end', { timestamp: clock.time + 150, target: { stats } });
+            }
+        ];
+        for (const during of frames) {
+            tick(app, {
+                during: () => {
+                    app._batcher._stats.updateLastFrameTime = 0.2;
+                    during();
+                }
+            });
+        }
+        tick(app);
+        return { app, capture };
+    }
+
+    it('keeps the counters of app.stats.user as each frame ended', function () {
+        const { capture } = record();
+        expect(capture.supports.counters).to.be.true;
+        expect(capture.counterNames).to.deep.equal(['ai', 'enemies']);
+        const [ai, enemies] = capture.counterRings;
+        expect([0, 1, 2].map(seq => ai[capture.slot(seq)])).to.deep.equal([0.25, 1.5, NaN]);
+        expect([0, 1, 2].map(seq => enemies[capture.slot(seq)])).to.deep.equal([NaN, 12, 12]);
+    });
+
+    it('times the batching of each frame, with the batches it created', function () {
+        const { capture } = record();
+        expect([0, 1, 2].map(seq => capture.get('batching', seq))).to.deep.equal([0.2, 5.2, 0.2]);
+        expect(capture.get('batchCreate', 1)).to.equal(5);
+        const cpu = buildPerfModel({ capture, seq: 1, range: null, gpu }).find(section => section.key === 'cpu');
+        expect(cpu.rows.find(row => row.key === 'batching').value.text).to.match(/ · creating batches 5\.00 ms$/);
+        // an app without a batcher has no row for it
+        const app = createApp(true);
+        const plain = new PerfCapture(app);
+        plain.start();
+        tick(app);
+        tick(app);
+        const rows = buildPerfModel({ capture: plain, seq: 0, range: null, gpu }).find(section => section.key === 'cpu').rows;
+        expect(rows.some(row => row.key === 'batching')).to.be.false;
+    });
+
+    it('marks a bake of lightmaps in the frame it ran in, with what took the time', function () {
+        const { capture } = record();
+        const bake = capture.events(2).find(event => event.kind === 'bake');
+        expect(bake).to.include({ duration: 150 });
+        expect(bake.bake).to.deep.equal({ lightmaps: 3, passes: 9, targets: 4, shaders: 2, compile: 30 });
+        const bit = 1 << EVENT_KINDS.findIndex(kind => kind.key === 'bake');
+        expect(eventMask(capture, 2) & bit).to.not.equal(0);
+        expect(eventLines(capture, 2, 'bake')).to.deep.equal([
+            '150.0 ms baking 3 lightmaps in 9 passes',
+            'render targets created in 4.00 ms · 2 shaders linked in 30.0 ms'
+        ]);
+        expect(eventUnsupported(capture, 'bake')).to.equal('');
+        // the charts have a row of bakes only for an app with a lightmapper
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        // the timeline draws it as work of the CPU, here under the update it ran inside
+        charts.pick(2);
+        const bars = charts._timelineModel().bars;
+        expect(bars.filter(bar => bar.name === 'Lightmap bake').map(bar => [bar.lane, bar.duration])).to.deep.equal([['detail', 150]]);
+        expect(bars.some(bar => bar.lane === 'events')).to.be.false;
+        // one in the render, as the engine's first bake, takes the place of the render's phases,
+        // whose times hold its own rendering
+        charts.pick(0);
+        expect(charts._timelineModel().bars.some(bar => bar.phase)).to.be.true;
+        const renderStart = capture.get('renderStart', 0);
+        /** @type {any} */ (capture)._addEventTo(capture.slot(0), { kind: 'bake', name: 'Lightmaps', start: renderStart + 0.5, duration: 1 });
+        const inRender = charts._timelineModel().bars;
+        expect(inRender.filter(bar => bar.name === 'Lightmap bake').map(bar => bar.lane)).to.deep.equal(['detail']);
+        expect(inRender.some(bar => bar.phase)).to.be.false;
+        expect(charts._eventKinds().map(k => EVENT_KINDS[k].key)).to.include('bake');
+        const without = /** @type {any} */ (new PerfCharts(document.createElement('div'), new PerfCapture(createApp())));
+        expect(without._eventKinds().map(k => EVENT_KINDS[k].key)).to.not.include('bake');
+        charts.destroy();
+        without.destroy();
+    });
+
+    it('lists the counters of a frame and of the frames selected together, and copies them', function () {
+        const { capture } = record();
+        const section = buildPerfModel({ capture, seq: 1, range: null, gpu }).find(s => s.key === 'counters');
+        expect(section.rows.map(row => [row.label, row.value.text])).to.deep.equal([['ai', '1.50'], ['enemies', '12']]);
+        const range = buildPerfModel({ capture, seq: 1, range: { from: 0, to: 2 }, gpu }).find(s => s.key === 'counters');
+        expect(range.title).to.equal('Counters, frames 1–3');
+        expect(range.rows[0].value.text).to.equal('avg 0.875 · p95 1.50 · max 1.50');
+        // none for a frame the app set none in
+        const app = createApp();
+        const plain = new PerfCapture(app);
+        plain.start();
+        tick(app);
+        tick(app);
+        expect(buildPerfModel({ capture: plain, seq: 0, range: null, gpu }).some(s => s.key === 'counters')).to.be.false;
+
+        expect(/** @type {any} */ (frameJson(capture, 1)).counters).to.deep.equal({ ai: 1.5, enemies: 12 });
+        expect(/** @type {any} */ (frameJson(capture, 1)).cpu.renderPhases).to.include({ batching: 5.2, creatingBatches: 5 });
+        expect(seriesRows(capture, 'counters', 0, 2)).to.deep.equal([{ frame: 1, ai: 0.25 }, { frame: 2, ai: 1.5, enemies: 12 }, { frame: 3, enemies: 12 }]);
+        const charts = /** @type {any} */ (new PerfCharts(document.createElement('div'), capture));
+        expect(charts._counterList().map(line => line.name)).to.deep.equal(['ai', 'enemies']);
         charts.destroy();
     });
 });

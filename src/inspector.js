@@ -130,6 +130,7 @@ const PERF_SERIES_NAMES = {
     gpu: 'GPU',
     draws: 'Draw calls',
     scripts: 'Scripts',
+    counters: 'Counters',
     loading: 'Loading',
     memory: 'Memory',
     resources: 'Resources',

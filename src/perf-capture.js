@@ -3,12 +3,23 @@
 /**
  * @typedef {object} PerfEvent
  * @ignore
- * @property {'long'|'marker'} kind - What happened: the browser reported a long animation frame,
- * or the app measured a span with `performance.measure`.
- * @property {string} name - What it was: the script that ran longest, or the measure.
+ * @property {'long'|'marker'|'bake'} kind - What happened: the browser reported a long animation
+ * frame, the app measured a span with `performance.measure`, or the lightmapper baked lightmaps.
+ * @property {string} name - What it was: the script that ran longest, the measure, or the bake.
  * @property {number} start - When it started, as a `performance.now()` time.
  * @property {number} duration - How long it took in milliseconds, zero for an instant.
  * @property {string} [detail] - More about it, such as the blocking time of a long frame.
+ * @property {PerfBake} [bake] - The figures of a bake of lightmaps.
+ */
+
+/**
+ * @typedef {object} PerfBake
+ * @ignore
+ * @property {number} lightmaps - How many lightmaps it baked.
+ * @property {number} passes - How many render passes it took.
+ * @property {number} targets - The time creating render targets, in milliseconds.
+ * @property {number} shaders - How many shaders it linked.
+ * @property {number} compile - The time compiling and linking them.
  */
 
 /**
@@ -88,6 +99,9 @@ const PASS_MATCH_SHARE = 0.6;
 // the events kept per frame, so an app measuring heavily cannot grow a frame without bound
 const MAX_FRAME_EVENTS = 64;
 
+// the most counters of `app.stats.user` kept, as an app could set any number
+const MAX_COUNTERS = 64;
+
 // the loads kept per entry: a startup can make hundreds of requests
 const MAX_ENTRY_LOADS = 4096;
 
@@ -132,8 +146,9 @@ const CHANNELS = [
     'cpuApp', 'cpuSystems', 'cpuOther',
     // reported by the splat sort worker, off the main thread
     'splatSort',
-    // render phases, with the profiler and debug engines only
-    'cull', 'sort', 'skin', 'morph', 'shadows', 'forward', 'clusters', 'clusterCount',
+    // render phases, with the profiler and debug engines only; the batching is the batcher
+    // updating the dynamic batches and creating those of groups changed, the second part apart
+    'batching', 'batchCreate', 'cull', 'sort', 'skin', 'morph', 'shadows', 'forward', 'clusters', 'clusterCount',
     // the work submitted
     'draws', 'drawsForward', 'drawsShadow', 'drawsMisc', 'drawsSkinned', 'primitives',
     'materialSwitches', 'shaderSwitches', 'cameras', 'shadowUpdates', 'dispatches', 'computePasses', 'splats',
@@ -216,6 +231,16 @@ function pipelineCount(device) {
     render.forEach(addBucket);
     webgpu.computePipeline?.cache?.forEach(addBucket);
     return pipelineTotal;
+}
+
+/**
+ * @param {AppBase} app - The app.
+ * @returns {{ createTime: number, updateLastFrameTime: number }|null} The times of its batcher,
+ * which the profiler and debug engines keep, or null.
+ */
+function batcherStats(app) {
+    const stats = /** @type {any} */ (app.stats);
+    return (stats && 'batcher' in stats ? stats.batcher : /** @type {any} */ (app)._batcher?._stats) ?? null;
 }
 
 /**
@@ -345,10 +370,12 @@ class PerfCapture {
 
     /**
      * What the browser, the device and the app report: long animation frames, the spans measured by
-     * the app, the size of the JavaScript heap, the pipelines created, which only WebGPU has, and
-     * the calls of scripts, which an app without a script system has none of.
+     * the app, the size of the JavaScript heap, the pipelines created, which only WebGPU has, the
+     * calls of scripts, which an app without a script system has none of, the counters of
+     * `app.stats.user`, which engines before 2.24 have none of, and the bakes of the lightmapper,
+     * which an app without one has none of.
      *
-     * @type {{ longFrames: boolean, measures: boolean, heap: boolean, pipelines: boolean, scripts: boolean }}
+     * @type {{ longFrames: boolean, measures: boolean, heap: boolean, pipelines: boolean, scripts: boolean, counters: boolean, lightmapper: boolean }}
      */
     supports;
 
@@ -358,6 +385,53 @@ class PerfCapture {
      * @type {string[]}
      */
     scriptNames = [];
+
+    /**
+     * The names of the counters the app keeps in `app.stats.user`, indexed by the ids of
+     * {@link PerfCapture#counterRings}, in the order the app first set them.
+     *
+     * @type {string[]}
+     */
+    counterNames = [];
+
+    /**
+     * The value of each counter as each frame ended, a ring of {@link PerfCapture#slots} each,
+     * NaN in a frame the app did not set it in.
+     *
+     * @type {Float64Array[]}
+     */
+    counterRings = [];
+
+    /**
+     * @type {Map<string, number>}
+     * @private
+     */
+    _counterIds = new Map();
+
+    /**
+     * The slot the counters are being taken into.
+     *
+     * @type {number}
+     * @private
+     */
+    _counterSlot = 0;
+
+    /**
+     * The batcher's time creating batches as the last frame ended, so a frame takes what it
+     * created.
+     *
+     * @type {number}
+     * @private
+     */
+    _batchCreated = NaN;
+
+    /**
+     * When the lightmapper began the bake in progress, NaN while none is.
+     *
+     * @type {number}
+     * @private
+     */
+    _bakeStart = NaN;
 
     /**
      * The class of each script type timed, by the same ids: the one it last ran as, as a
@@ -615,7 +689,9 @@ class PerfCapture {
             measures: observable('measure'),
             heap: Number.isFinite(heapSize()),
             pipelines: Number.isFinite(pipelineCount(app.graphicsDevice)),
-            scripts: !!scriptPrototype(app)
+            scripts: !!scriptPrototype(app),
+            counters: app.stats?.user instanceof Map,
+            lightmapper: !!app.lightmapper
         };
     }
 
@@ -716,6 +792,10 @@ class PerfCapture {
         device.on('shader:compile:end', this._onCompileEnd, this);
         device.on('shader:link:start', this._onLinkStart, this);
         device.on('shader:link:end', this._onLinkEnd, this);
+        device.on('lightmapper:start', this._onBakeStart, this);
+        device.on('lightmapper:end', this._onBakeEnd, this);
+        this._batchCreated = batcherStats(app)?.createTime ?? NaN;
+        this._bakeStart = NaN;
         // recording from before the app's first frame records its start too, as an entry of its own
         const startup = this._end === 0 && !(app.frame > 0);
         if (startup) this._beginStartup();
@@ -748,6 +828,8 @@ class PerfCapture {
         device.off('shader:compile:end', this._onCompileEnd, this);
         device.off('shader:link:start', this._onLinkStart, this);
         device.off('shader:link:end', this._onLinkEnd, this);
+        device.off('lightmapper:start', this._onBakeStart, this);
+        device.off('lightmapper:end', this._onBakeEnd, this);
         for (const observer of this._observers) observer.disconnect();
         this._observers.length = 0;
         this._unhookScripts();
@@ -1198,6 +1280,28 @@ class PerfCapture {
         data.cpuApp[slot] = data.cpu[slot] - data.inspector[slot];
         // accumulated through the frame from the worker's reports, and reset once it ends
         data.splatSort[slot] = frame.gsplatSort ?? 0;
+
+        // the batcher works at the start of the render, timed by the profiler and debug engines:
+        // the dynamic batches updated, and the batches created of the groups changed since
+        const batcher = batcherStats(app);
+        if (batcher && Number.isFinite(batcher.updateLastFrameTime)) {
+            const created = Number.isFinite(this._batchCreated) ? Math.max(0, batcher.createTime - this._batchCreated) : 0;
+            this._batchCreated = batcher.createTime;
+            data.batchCreate[slot] = created;
+            data.batching[slot] = (rendered ? batcher.updateLastFrameTime : 0) + created;
+        } else {
+            data.batching[slot] = NaN;
+            data.batchCreate[slot] = NaN;
+        }
+
+        // the app's own counters, as the frame left them
+        const user = stats.user;
+        if (user instanceof Map) {
+            const rings = this.counterRings;
+            for (let i = 0; i < rings.length; i++) rings[i][slot] = NaN;
+            this._counterSlot = slot;
+            user.forEach(this._takeCounter);
+        }
 
         const vram = stats.vram;
         data.vramTex[slot] = vram?.tex ?? NaN;
@@ -1780,6 +1884,58 @@ class PerfCapture {
     /** @private */
     _onAppStart() {
         this._addMilestone('App start', performance.now());
+    }
+
+    /**
+     * Takes a counter of `app.stats.user` into the frame ending, keeping a ring for it the first
+     * time the app sets it.
+     *
+     * @param {*} value - Its value.
+     * @param {string} name - Its name.
+     * @private
+     */
+    _takeCounter = (value, name) => {
+        let id = this._counterIds.get(name);
+        if (id === undefined) {
+            if (this.counterRings.length >= MAX_COUNTERS) return;
+            id = this.counterRings.length;
+            this._counterIds.set(name, id);
+            this.counterNames.push(String(name));
+            this.counterRings.push(new Float64Array(this._slots).fill(NaN));
+        }
+        this.counterRings[id][this._counterSlot] = typeof value === 'number' ? value : NaN;
+    };
+
+    /**
+     * @param {{ timestamp: number }} e - The event.
+     * @private
+     */
+    _onBakeStart(e) {
+        this._bakeStart = e?.timestamp ?? performance.now();
+    }
+
+    /**
+     * Adds a bake of lightmaps to the frame it ran in, with the figures the lightmapper kept of it.
+     *
+     * @param {{ timestamp: number, target: { stats: object } }} e - The event.
+     * @private
+     */
+    _onBakeEnd(e) {
+        const end = e?.timestamp ?? performance.now();
+        const start = Number.isFinite(this._bakeStart) ? this._bakeStart : end;
+        this._bakeStart = NaN;
+        const stats = /** @type {any} */ (e?.target?.stats ?? this._app.lightmapper?.stats ?? {});
+        // not its times rendering shadow maps and the lightmaps, which add the renderer's running
+        // totals for the frame after each pass, so they count the earlier passes again
+        /** @type {PerfBake} */
+        const bake = {
+            lightmaps: stats.lightmapCount ?? NaN,
+            passes: stats.renderPasses ?? NaN,
+            targets: stats.fboTime ?? NaN,
+            shaders: stats.shadersLinked ?? NaN,
+            compile: stats.compileTime ?? NaN
+        };
+        this._addEvent({ kind: 'bake', name: 'Lightmaps', start, duration: end - start, bake });
     }
 
     /**
