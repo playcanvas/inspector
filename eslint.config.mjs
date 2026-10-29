@@ -10,20 +10,12 @@ export default [
             sourceType: 'module',
             globals: {
                 ...globals.browser,
-                ...globals.mocha,
                 ...globals.node,
                 Ammo: 'readonly'
             }
         },
         rules: {
             'import/order': 'off'
-        }
-    },
-    {
-        files: ['test/**/*.mjs'],
-        rules: {
-            'no-unused-expressions': 'off',
-            'prefer-arrow-callback': 'off' // Mocha uses function callbacks
         }
     }
 ];
