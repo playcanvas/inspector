@@ -1,5 +1,5 @@
 import {
-    Asset, AssetRegistry, BindGroupFormat, BindStorageBufferFormat, BindTextureFormat, BindUniformBufferFormat, BLEND_NORMAL, Color, createScript, Entity, EventHandler, FILTER_LINEAR, FILTER_NEAREST, FUNC_LESS, GraphNode, Mesh, MeshInstance, NullGraphicsDevice, PIXELFORMAT_111110F, PIXELFORMAT_BGRA8, PIXELFORMAT_DEPTH, PIXELFORMAT_DXT1, PIXELFORMAT_R32U, PIXELFORMAT_R8, PIXELFORMAT_RG16F, PIXELFORMAT_RGB10A2, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA8, PIXELFORMAT_SRGB8, PROJECTION_ORTHOGRAPHIC, RenderPassForward, RENDERSTYLE_POINTS, RENDERSTYLE_SOLID, RENDERSTYLE_WIREFRAME, RenderTarget, SAMPLETYPE_DEPTH, Script, ScriptRegistry, SEMANTIC_POSITION, Shader, SHADERLANGUAGE_WGSL, SHADERSTAGE_COMPUTE, SHADERSTAGE_FRAGMENT, SHADERSTAGE_VERTEX, StandardMaterial, StorageBuffer, Texture, TEXTUREDIMENSION_2D, UniformBufferFormat, UniformFormat, UNIFORMTYPE_FLOAT, UNIFORMTYPE_MAT4, UNIFORMTYPE_VEC3, Vec3, Vec4
+    Asset, AssetRegistry, BindGroupFormat, BindStorageBufferFormat, BindTextureFormat, BindUniformBufferFormat, BLEND_NORMAL, Color, createScript, Entity, EventHandler, FILTER_LINEAR, FILTER_NEAREST, FUNC_LESS, GraphNode, Mesh, MeshInstance, NullGraphicsDevice, PIXELFORMAT_111110F, PIXELFORMAT_ASTC_4x4, PIXELFORMAT_ATC_RGB, PIXELFORMAT_BC7, PIXELFORMAT_BGRA8, PIXELFORMAT_DEPTH, PIXELFORMAT_DXT1, PIXELFORMAT_R32U, PIXELFORMAT_R8, PIXELFORMAT_RG16F, PIXELFORMAT_RGB10A2, PIXELFORMAT_RGB9E5, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA8, PIXELFORMAT_SRGB8, PROJECTION_ORTHOGRAPHIC, RenderPassForward, RENDERSTYLE_POINTS, RENDERSTYLE_SOLID, RENDERSTYLE_WIREFRAME, RenderTarget, SAMPLETYPE_DEPTH, Script, ScriptRegistry, SEMANTIC_POSITION, Shader, SHADERLANGUAGE_WGSL, SHADERSTAGE_COMPUTE, SHADERSTAGE_FRAGMENT, SHADERSTAGE_VERTEX, StandardMaterial, StorageBuffer, Texture, TEXTUREDIMENSION_2D, UniformBufferFormat, UniformFormat, UNIFORMTYPE_FLOAT, UNIFORMTYPE_MAT4, UNIFORMTYPE_VEC3, Vec3, Vec4
 } from 'playcanvas';
 
 import { expect } from 'chai';
@@ -1053,11 +1053,17 @@ describe('Inspector render target preview', function () {
         expect(formatChannels(PIXELFORMAT_RGBA8)).to.equal('rgba');
         expect(formatChannels(PIXELFORMAT_BGRA8)).to.equal('rgba');
         expect(formatChannels(PIXELFORMAT_RGB10A2)).to.equal('rgba');
+        expect(formatChannels(PIXELFORMAT_RGB9E5)).to.equal('rgb');
 
-        // nothing to say about depth, packed or compressed formats
+        // named RG11B10F by newer engines and 111110F by older ones, which this alias still reaches
+        expect(formatChannels(PIXELFORMAT_111110F)).to.equal('rgb');
+
+        // nothing to say about depth or compressed formats, even those named with a leading A or B
         expect(formatChannels(PIXELFORMAT_DEPTH)).to.equal('');
-        expect(formatChannels(PIXELFORMAT_111110F)).to.equal('');
         expect(formatChannels(PIXELFORMAT_DXT1)).to.equal('');
+        expect(formatChannels(PIXELFORMAT_ATC_RGB)).to.equal('');
+        expect(formatChannels(PIXELFORMAT_ASTC_4x4)).to.equal('');
+        expect(formatChannels(PIXELFORMAT_BC7)).to.equal('');
         expect(formatChannels(-1)).to.equal('');
     });
 });
