@@ -269,19 +269,22 @@ function previewSupport(texture, device) {
 }
 
 /**
- * The r, g, b and a channels an uncompressed color format stores, read from its name: R8 stores
- * 'r', RG16F 'rg', SRGB8 'rgb', BGRA8 and RGB10A2 'rgba'. Sampling a channel the format lacks
- * returns a constant (0, or 1 for alpha), so a preview of it shows nothing. Empty when the name
- * carries no channel letters: depth, the packed 111110F and compressed formats.
+ * The r, g, b and a channels an uncompressed color format stores, read from its name, where each
+ * run of channel letters is followed by its bit count: R8 stores 'r', RG16F 'rg', SRGB8, RG11B10F
+ * and RGB9E5 'rgb', BGRA8 and RGB10A2 'rgba'. Sampling a channel the format lacks returns a
+ * constant (0, or 1 for alpha), so a preview of it shows nothing. Empty when the name carries no
+ * channel letters with bit counts: depth, and compressed formats such as ATC_RGB or BC7_RGBA.
  *
  * @param {number} format - A PIXELFORMAT_* constant.
  * @returns {string} The stored channels as lower-case letters from 'rgba', or ''.
  */
 function formatChannels(format) {
-    const name = pixelFormatInfo.get(format)?.name ?? '';
-    const match = /^S?([RGBA]+)(?:\d+(A)\d)?/.exec(name);
+    let name = pixelFormatInfo.get(format)?.name ?? '';
+    // older engines name RG11B10F '111110F', without its channel letters
+    if (name === '111110F') name = 'RG11B10F';
+    const match = /^S?((?:[RGBA]+\d+)+)/.exec(name);
     if (!match) return '';
-    const letters = (match[1] + (match[2] ?? '')).toLowerCase();
+    const letters = match[1].toLowerCase();
     return [...'rgba'].filter(letter => letters.includes(letter)).join('');
 }
 
