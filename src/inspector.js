@@ -20,7 +20,7 @@ import {
 } from './material-view.js';
 import { buildMeshModel, meshBytes, meshListRows, meshNote, surveyMeshes } from './mesh-view.js';
 import { formatBytes, formatName, passDisplayName } from './model.js';
-import { TOOLS as MCP_TOOLS, validate as validateMcpArgs } from './mcp-tools.js';
+import { TOOLS as MCP_TOOLS, endPerfSession, validate as validateMcpArgs } from './mcp-tools.js';
 import { buildComponentModel, buildNodeModel, meshInstanceRows } from './node-model.js';
 import { PerfCapture } from './perf-capture.js';
 import { PerfCharts } from './perf-chart.js';
@@ -69,7 +69,7 @@ import { TRANSFORM_POINTER_EVENTS, TransformTool } from './transform-tool.js';
  * @property {boolean} [record] - Whether to start recording frames for the Performance tab right
  * away, as if Record were pressed, so the capture begins with the first frame the app runs after
  * the inspector is created. Defaults to false. See {@link Inspector#recording}.
- * @property {boolean} [mcp] - Whether to offer the inspector's read-only tools to AI agents right
+ * @property {boolean} [mcp] - Whether to offer the inspector's tools to AI agents right
  * away, as if the MCP button was pressed. Defaults to false. A setting stored by the button takes
  * precedence. See {@link Inspector#mcp}.
  * @property {(visible: boolean) => void} [onVisibleChange] - Called with the new visibility
@@ -1149,6 +1149,28 @@ class Inspector {
         frame: () => {
             this._mcpFrame ??= this._frozen && this._frame ? this._frame : captureFrameGraph(this._app);
             return this._mcpFrame;
+        },
+        perf: {
+            capture: /** @type {any} */ (null),
+            setRecording: (on) => {
+                this._setRecording(on);
+            },
+            setGpuTimings: (on) => {
+                this._setGpuTimings(on);
+            },
+            setScriptTiming: (on) => {
+                this._setScriptTiming(on);
+            },
+            clear: () => {
+                this._perf.clear();
+                this._perfCharts.reset();
+            },
+            gpuSupported: () => !!this._app.graphicsDevice.gpuProfiler,
+            gpuTimings: () => !!this._app.graphicsDevice.gpuProfiler?.enabled,
+            paused: () => this._paused,
+            device: () => this._deviceInfo(),
+            byAgent: false,
+            session: null
         }
     };
 
@@ -1243,6 +1265,7 @@ class Inspector {
         this._setTab('hierarchy');
         this._storageKey = options.storageKey === undefined ? 'pc-inspector' : options.storageKey;
         this._mcpHost.app = app;
+        this._mcpHost.perf.capture = this._perf;
         this._mcp = !!options.mcp;
         this._loadSettings();
         this._applyMcp();
@@ -1284,6 +1307,7 @@ class Inspector {
         this.paused = false;
         this._mcpAbort?.abort();
         this._mcpAbort = null;
+        endPerfSession(this._mcpHost, 'inspector destroyed');
         this._perf.destroy();
         this._perfCharts.destroy();
         const profiler = app.graphicsDevice?.gpuProfiler;
@@ -1328,8 +1352,10 @@ class Inspector {
 
     /**
      * Whether the inspector offers its tools to AI agents: tools that read the app as the panel
-     * shows it, the hierarchy, the lists of its tabs and any object by id, and never change it.
-     * Toggled by the MCP button of the toolbar, and kept on while the panel is hidden.
+     * shows it, the hierarchy, the lists of its tabs and any object by id, and tools that record
+     * frames on the Performance tab and read what they recorded. None of them changes the app;
+     * the recording tools change only the inspector's capture and its timing switches. Toggled by
+     * the MCP button of the toolbar, and kept on while the panel is hidden.
      *
      * While on, the tools are registered with WebMCP (`document.modelContext`) where the browser
      * has it, for agents running in the browser, and can be called from the page through
@@ -1429,6 +1455,8 @@ class Inspector {
         } else if (!this._mcp && this._mcpAbort) {
             this._mcpAbort.abort();
             this._mcpAbort = null;
+            // a recording the tools were to stop stops with them
+            endPerfSession(this._mcpHost, 'MCP turned off');
         }
 
         if (this._mcpBtn) {
@@ -1437,8 +1465,8 @@ class Inspector {
                 'registered with WebMCP, and callable from the page through executeTool' :
                 'callable from the page through executeTool. This browser has no WebMCP, so agents in the browser do not see them';
             setTip(this._mcpBtn, this._mcp ?
-                `MCP on: read-only tools for AI agents are ${how}. They stay on while the panel is hidden. Click to turn them off` :
-                'MCP: offer read-only tools to AI agents, which read the hierarchy, the lists of the tabs and any object by id, and never change the app');
+                `MCP on: tools for AI agents are ${how}. They stay on while the panel is hidden. Click to turn them off` :
+                'MCP: offer tools to AI agents, which read the hierarchy, the lists of the tabs and any object by id, and record on the Performance tab, and never change the app');
         }
     }
 
@@ -3084,6 +3112,9 @@ class Inspector {
      * @private
      */
     _setRecording(on) {
+        // a capture started other than by the tools is the user's, which the tools do not clear
+        // unasked; the tools mark their own once started
+        if (on && !this._perf.recording) this._mcpHost.perf.byAgent = false;
         if (on) this._perf.start();
         else this._perf.stop();
         this._perfCharts.invalidate();
@@ -3564,11 +3595,8 @@ class Inspector {
         const frames = charts.range ? `, ${capture.rangeLabel(from, to).toLowerCase()}` : '';
         const figures = json => ({ json, objects: 0, truncated: false });
         switch (what.kind) {
-            case 'capture': {
-                const device = this._app.graphicsDevice;
-                const info = { type: device.deviceType, width: device.width, height: device.height, maxPixelRatio: device.maxPixelRatio };
-                return { title: `Performance${frames}`, plain: true, copy: () => figures(captureJson(capture, from, to, info)) };
-            }
+            case 'capture':
+                return { title: `Performance${frames}`, plain: true, copy: () => figures(captureJson(capture, from, to, this._deviceInfo())) };
             case 'series': {
                 const name = PERF_SERIES_NAMES[what.key] ?? what.key;
                 return {
@@ -3588,6 +3616,15 @@ class Inspector {
             }
         }
         return null;
+    }
+
+    /**
+     * @returns {object} What a copy of a capture says about the device: its type and size.
+     * @private
+     */
+    _deviceInfo() {
+        const device = this._app.graphicsDevice;
+        return { type: device.deviceType, width: device.width, height: device.height, maxPixelRatio: device.maxPixelRatio };
     }
 
     /**

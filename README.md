@@ -195,7 +195,8 @@ their figures, and the timeline to copy its bars.
 
 ### AI agents (MCP)
 
-Click **MCP** at the right end of the status bar to let AI agents read the app. It turns orange
+Click **MCP** at the right end of the status bar to let AI agents read the app and profile it on
+the Performance tab. It turns orange
 while on, is remembered with the other settings, and keeps working while the panel is hidden. Or
 turn it on from code:
 
@@ -203,7 +204,7 @@ turn it on from code:
 const inspector = new Inspector(app, { mcp: true });
 ```
 
-The tools only read the app and never change it:
+No tool changes the app. These only read it:
 
 | Tool | What it returns |
 | --- | --- |
@@ -218,6 +219,28 @@ agent follows links from one object to the next: an entity to its mesh instances
 its shader, and back through the materials using that shader. `depth` copies linked objects in place,
 up to 4 links away. Shader sources are left out unless `sources` is true. Ids stay the same for the
 life of the inspector.
+
+These record frames on the Performance tab, as its Record button does, and read what was recorded.
+Only `playcanvas_perf_record` and `playcanvas_perf_stop` change anything, and that is the
+inspector's capture and its timing switches:
+
+| Tool | What it does |
+| --- | --- |
+| `playcanvas_perf_record` | Starts recording, optionally with GPU and script timing. With `frames`, stops after that many and returns their summary, or gives up after `timeout` seconds, as frames stop while the page is hidden |
+| `playcanvas_perf_stop` | Stops recording and returns the summary |
+| `playcanvas_perf_status` | Whether it is recording, the frames kept, the timings on and whether the page is visible |
+| `playcanvas_perf_summary` | A few KB: the min, average, 95th percentile and max of frame time, CPU update and render, scripts, GPU, draw calls and memory, the slowest GPU passes and script types, the hitches, what loaded and the shader compiles |
+| `playcanvas_perf_frame` | One frame in full, as right-clicking it copies it |
+| `playcanvas_perf_series` | One series a row per frame, as JSON or CSV, 300 rows at a time |
+
+```javascript
+const { summary } = await inspector.executeTool('playcanvas_perf_record', { frames: 120, gpuTimings: true, scriptTiming: true });
+const slowest = await inspector.executeTool('playcanvas_perf_frame', { frame: summary.hitches.longest[0]?.frame ?? 1 });
+```
+
+The summary's CPU figures leave out the inspector's own time, and say how much it was;
+`includeInspector` counts it. A capture the user recorded is not discarded unless `clear` is true;
+`clear: false` adds to it.
 
 Each tool describes itself with a description and a JSON schema of its arguments, which is all an
 agent needs to use it. While MCP is on, the tools are offered two ways:
@@ -288,6 +311,25 @@ rather than read: `index.json`, then a file per kind (`entities.json`, `material
 `shaders.json` with their sources, `meshInstances.json` and so on) holding every object as
 `playcanvas_get` returns it, keyed by its `$id`, so the links between objects resolve across the
 files. A `README.md` in the directory describes them.
+
+`node e2e/webmcp.mjs --perf <frames> [dir]` records that many frames through the perf tools, with GPU
+and script timing where the app has them, prints the summary and writes `capture.json` (every frame,
+as copying the capture gives it), `summary.json` and a CSV per series (`series-cpu.csv`,
+`series-gpu.csv` and so on) into the directory, or into the `--dump` directory.
+
+`--perf-dump [dir]` writes the same files from the capture the Performance tab already holds, without
+recording, such as one recorded with its Record button. As the script otherwise opens a page of its
+own, record in one of these:
+
+- `--wait` opens a window and waits for Enter in the terminal, so you can record there first.
+- `--connect <url>` uses a Chrome you already run, started with
+  `--remote-debugging-port=9222 --user-data-dir=<dir> --enable-features=WebMCP`, given as
+  `http://127.0.0.1:9222`. It picks the tab with the inspector (or the one whose URL contains
+  `--url`'s value) and leaves Chrome running.
+
+```sh
+node e2e/webmcp.mjs --connect http://127.0.0.1:9222 --perf-dump ./capture
+```
 
 The tests run against the `playcanvas` version in `devDependencies`, on the engine's null graphics
 device under jsdom.

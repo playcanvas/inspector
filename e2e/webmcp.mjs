@@ -3,7 +3,8 @@
 // inspector, presses the MCP switch in the status bar, then lists the tools the page registered
 // with document.modelContext and calls them.
 //
-// node e2e/webmcp.mjs [--url <page>] [--headless] [--calls '<json>'] [--dump <dir>]
+// node e2e/webmcp.mjs [--url <page>] [--headless] [--calls '<json>'] [--dump <dir>] [--perf <frames> [dir]]
+//                      [--perf-dump [dir]] [--wait] [--connect <browser-url>]
 //
 // --url      A page whose app has an Inspector. Defaults to the inspector example of the engine's
 //            examples browser on port 5620, opened without the browser around it.
@@ -15,6 +16,24 @@
 //            rather than read: index.json, then a file per kind (entities.json, materials.json,
 //            shaders.json with their sources, ...) holding each object as playcanvas_get returns
 //            it, keyed by its $id. The links between objects are $id references across the files.
+// --perf     Records that many frames on the Performance tab through the perf tools, with GPU and
+//            script timing where the app has them, prints the summary, then writes the capture to
+//            files: capture.json (the header and every frame, as playcanvas_perf_frame returns
+//            them) and a CSV per series (series-cpu.csv, series-gpu.csv, ...). Into the directory
+//            given after the frames, else the --dump directory; with neither, it only prints the
+//            summary.
+// --perf-dump
+//            Writes the capture the Performance tab already holds to the same files as --perf,
+//            without recording: one recorded with its Record button. Into the directory given after
+//            it, else the --dump directory, else perf-dump. Use it with --wait or --connect, as a
+//            page this script opens has recorded nothing yet.
+// --wait     Opens a window and waits for Enter in the terminal before calling anything, so a
+//            capture can be recorded by hand in it first. Implies a window, not --headless.
+// --connect  Uses a Chrome already running rather than launching one, such as the one a capture
+//            was recorded in, given by its remote debugging URL (http://127.0.0.1:9222 for a
+//            Chrome started with --remote-debugging-port=9222 --enable-features=WebMCP). Uses its
+//            tab whose URL contains --url's value when given, else the first tab with an inspector,
+//            and leaves Chrome running.
 // --headless Run Chrome without a window.
 //
 // Needs Chrome 150+ (WebMCP behind --enable-features=WebMCP). Set CHROME_PATH to use another build.
@@ -22,7 +41,9 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { launch } from 'puppeteer-core';
+import { connect, launch } from 'puppeteer-core';
+
+import { toCsv } from '../src/perf-copy.js';
 
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -33,6 +54,18 @@ const option = (name) => {
 const url = option('--url') ?? 'http://localhost:5620/iframe/debug_inspector.html';
 const headless = args.includes('--headless');
 const dumpDir = option('--dump');
+const perfFrames = option('--perf') ? Number(option('--perf')) : 0;
+const perfNext = args[args.indexOf('--perf') + 2];
+const perfDir = perfFrames ? (perfNext && !perfNext.startsWith('--') ? perfNext : dumpDir) : undefined;
+if (option('--perf') && !(Number.isInteger(perfFrames) && perfFrames >= 1 && perfFrames <= 1000)) {
+    console.error('--perf takes a number of frames from 1 to 1000');
+    process.exit(1);
+}
+const perfDumpIndex = args.indexOf('--perf-dump');
+const perfDumpNext = perfDumpIndex >= 0 ? args[perfDumpIndex + 1] : undefined;
+const perfDumpDir = perfDumpIndex < 0 ? undefined : perfDumpNext && !perfDumpNext.startsWith('--') ? perfDumpNext : dumpDir ?? 'perf-dump';
+const wait = args.includes('--wait');
+const connectUrl = option('--connect');
 const executablePath = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 const DEFAULT_CALLS = [
@@ -45,7 +78,10 @@ const DEFAULT_CALLS = [
     ['playcanvas_list', { kind: 'passes', limit: 5 }],
     ['playcanvas_list', { kind: 'memory', limit: 4 }]
 ];
-const calls = option('--calls') ? JSON.parse(option('--calls')) : dumpDir ? [] : DEFAULT_CALLS;
+const calls = option('--calls') ? JSON.parse(option('--calls')) : dumpDir || perfFrames || perfDumpDir ? [] : DEFAULT_CALLS;
+
+// the series of the Performance tab written to a CSV each
+const PERF_SERIES = ['frame', 'cpu', 'gpu', 'draws', 'scripts', 'memory', 'resources', 'counters', 'loading', 'events'];
 
 // the kinds of the index dumped to a file each, and the arguments each object is got with
 const DUMP_KINDS = {
@@ -256,18 +292,154 @@ async function dump(page, dir) {
     return ok;
 }
 
-const browser = await launch({
+/**
+ * Records frames through the perf tools, prints their summary and writes the capture to files,
+ * see --perf.
+ *
+ * @param {import('puppeteer-core').Page} page - The page.
+ * @param {number} frames - How many frames to record.
+ * @param {string|undefined} dir - The directory, or none to only print the summary.
+ * @returns {Promise<boolean>} Whether every call succeeded.
+ */
+async function perf(page, frames, dir) {
+    const started = Date.now();
+    const status = await callTool(page, 'playcanvas_perf_status', {});
+    if (status.error) throw new Error(`playcanvas_perf_status failed: ${status.error}`);
+    const { gpuTimingsSupported, scriptTimingSupported } = status.result.options;
+    const input = {
+        frames,
+        clear: true,
+        timeout: Math.min(300, Math.max(30, Math.ceil(frames / 10))),
+        ...(gpuTimingsSupported ? { gpuTimings: true } : {}),
+        ...(scriptTimingSupported ? { scriptTiming: true } : {})
+    };
+    const record = await callTool(page, 'playcanvas_perf_record', input);
+    if (record.error) throw new Error(`playcanvas_perf_record failed: ${record.error}`);
+    console.log(`\nplaycanvas_perf_record ${JSON.stringify(input)} (${record.ms} ms, ${record.text.length} chars)\n${print(record.result)}`);
+    const summary = record.result.summary;
+    if (!dir || !summary) return !!summary;
+    return writeCapture(page, summary, dir, started);
+}
+
+/**
+ * Writes the capture the Performance tab holds to files, without recording, see --perf-dump.
+ *
+ * @param {import('puppeteer-core').Page} page - The page.
+ * @param {string} dir - The directory.
+ * @returns {Promise<boolean>} Whether every call succeeded.
+ */
+async function perfDump(page, dir) {
+    const started = Date.now();
+    const status = await callTool(page, 'playcanvas_perf_status', {});
+    if (status.error) throw new Error(`playcanvas_perf_status failed: ${status.error}`);
+    console.log(`\nplaycanvas_perf_status\n${print(status.result)}`);
+    // a capture still recording is written up to the frame summarized, and keeps recording
+    const summary = await callTool(page, 'playcanvas_perf_summary', {});
+    if (summary.error) throw new Error(`No capture to write: ${summary.error}`);
+    return writeCapture(page, summary.result, dir, started);
+}
+
+/**
+ * Writes a capture to files: capture.json, summary.json and a CSV per series.
+ *
+ * @param {import('puppeteer-core').Page} page - The page.
+ * @param {any} summary - The summary of the frames to write, which says their range.
+ * @param {string} dir - The directory.
+ * @param {number} started - When the work began, for the time it took.
+ * @returns {Promise<boolean>} Whether every call succeeded.
+ */
+async function writeCapture(page, summary, dir, started) {
+    mkdirSync(dir, { recursive: true });
+    let ok = true;
+    const written = [];
+    const write = (file, text) => {
+        writeFileSync(join(dir, file), text);
+        written.push(`${file} ${(text.length / 1024).toFixed(1)} KB`);
+    };
+
+    // the capture as the panel copies it: the header the summary starts with, then every frame
+    const { range, medianFrame, displayInterval, engineBuild, gpuTimingsExact, clockStep, device } = summary;
+    const capture = { range, medianFrame, displayInterval, engineBuild, gpuTimingsExact, ...(clockStep ? { clockStep } : {}), device, frames: [] };
+    const numbers = Array.from({ length: range.to - range.from + 1 }, (_, i) => range.from + i);
+    await sequence(numbers, async (frame) => {
+        const reply = await callTool(page, 'playcanvas_perf_frame', { frame });
+        if (reply.error) ok = false;
+        capture.frames.push(reply.error ? { frame, $error: reply.error } : reply.result);
+    });
+    write('capture.json', JSON.stringify(capture, null, 1));
+
+    // each series a page of rows at a time, written as one CSV with the columns of every page
+    await sequence(PERF_SERIES, async (key) => {
+        const rows = [];
+        const readFrom = async (from) => {
+            const reply = await callTool(page, 'playcanvas_perf_series', { key, from, to: range.to });
+            if (reply.error) {
+                ok = false;
+                console.log(`playcanvas_perf_series ${key} failed: ${reply.error}`);
+                return;
+            }
+            rows.push(...reply.result.rows);
+            if (reply.result.next !== undefined) await readFrom(reply.result.next);
+        };
+        await readFrom(range.from);
+        if (rows.length) write(`series-${key}.csv`, toCsv(rows));
+    });
+    write('summary.json', JSON.stringify(summary, null, 1));
+
+    console.log(`\nWrote the capture to ${dir} in ${((Date.now() - started) / 1000).toFixed(1)} s:\n  ${written.join('\n  ')}`);
+    return ok;
+}
+
+/**
+ * @param {import('puppeteer-core').Browser} running - A Chrome connected to.
+ * @returns {Promise<import('puppeteer-core').Page>} Its tab whose URL contains --url's value when
+ * given, else its first tab with an inspector.
+ */
+async function findPage(running) {
+    const pages = await running.pages();
+    const wanted = option('--url');
+    if (wanted) {
+        const page = pages.find(p => p.url().includes(wanted));
+        if (!page) throw new Error(`No tab's URL contains ${wanted}: ${pages.map(p => p.url()).join(', ')}`);
+        return page;
+    }
+    const found = await Promise.all(pages.map(p => p.evaluate(() => !!document.querySelector('.pc-inspector')).catch(() => false)));
+    const page = pages[found.indexOf(true)];
+    if (!page) throw new Error(`No tab has an inspector: ${pages.map(p => p.url()).join(', ')}`);
+    return page;
+}
+
+/**
+ * @returns {Promise<void>} Resolves once Enter is pressed in the terminal.
+ */
+function enterPressed() {
+    return new Promise((resolve) => {
+        process.stdin.resume();
+        process.stdin.once('data', () => {
+            process.stdin.pause();
+            resolve();
+        });
+    });
+}
+
+const browser = connectUrl ? await connect({ browserURL: connectUrl, defaultViewport: null }) : await launch({
     executablePath,
-    headless,
+    headless: headless && !wait,
     args: ['--enable-features=WebMCP', '--window-size=1400,900']
 });
 
 let failed = false;
 try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1400, height: 900 });
+    let page;
+    if (connectUrl) {
+        page = await findPage(browser);
+        console.log(`Using the tab at ${page.url()}`);
+    } else {
+        page = await browser.newPage();
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'load' });
+    }
     page.on('pageerror', e => console.error(`[page error] ${e.message}`));
-    await page.goto(url, { waitUntil: 'load' });
 
     if (!await page.evaluate(() => typeof document.modelContext?.getTools === 'function')) {
         throw new Error('This Chrome has no WebMCP (document.modelContext)');
@@ -283,6 +455,11 @@ try {
     });
     console.log(`MCP switch: ${wasOn ? 'already on' : 'pressed'}`);
 
+    if (wait) {
+        console.log('\nRecord on the Performance tab in the window (Record, then Record again to stop), then press Enter here.');
+        await enterPressed();
+    }
+
     await page.waitForFunction(async () => (await document.modelContext.getTools()).some(t => t.name.startsWith('playcanvas_')), { timeout: 10000 });
     const tools = await page.evaluate(async () => (await document.modelContext.getTools()).map(t => ({
         name: t.name,
@@ -292,6 +469,8 @@ try {
     console.log(`\nWebMCP tools registered by the page:\n${print(tools)}`);
 
     if (dumpDir && !await dump(page, dumpDir)) failed = true;
+    if (perfFrames && !await perf(page, perfFrames, perfDir)) failed = true;
+    if (perfDumpDir && !await perfDump(page, perfDumpDir)) failed = true;
 
     const results = [];
     await sequence(calls, async ([name, rawInput], index) => {
@@ -309,6 +488,8 @@ try {
     failed = true;
     console.error(`\nFAILED: ${e?.message ?? e}`);
 } finally {
-    await browser.close();
+    // a Chrome connected to is the user's, and keeps running
+    if (connectUrl) await browser.disconnect();
+    else await browser.close();
 }
 process.exit(failed ? 1 : 0);
