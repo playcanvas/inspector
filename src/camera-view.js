@@ -79,7 +79,7 @@ function cameraRows(app, flying) {
         if (camera === flying) cells.push({ text: 'flying', cls: 'pci-cell-tag' });
         cells.push({ text: `priority ${camera.priority} · ${camera.layers.length} layers · ${targetText(camera)}`, cls: 'pci-cell-info' });
         const running = camera.enabled && entity.enabled;
-        return { key: `camera${entity.getGuid?.() ?? name}`, item: camera, name, dim: !running, title: `${name}\n${targetText(camera)}`, cells };
+        return { key: `camera${entity.guid ?? name}`, item: camera, name, dim: !running, title: `${name}\n${targetText(camera)}`, cells };
     });
 }
 
