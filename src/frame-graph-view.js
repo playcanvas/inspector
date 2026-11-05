@@ -516,8 +516,8 @@ function passRows(frame, device) {
                 dim: !enabled,
                 cells: [
                     { text: '', cls: 'pci-cell-index' },
-                    { text: camera?.name ?? '-', cls: 'pci-cell-info', target: camera ?? undefined, title: 'Camera' },
-                    { text: `· ${layer.name} · ${step.transparent ? 'transparent' : 'opaque'} · ${drawnText(lists[i], layer)}${flags}`, cls: 'pci-cell-info' }
+                    { text: camera?.name ?? '-', cls: 'pci-cell-info', target: camera ?? undefined, title: 'Camera', field: 'camera' },
+                    { text: `· ${layer.name} · ${step.transparent ? 'transparent' : 'opaque'} · ${drawnText(lists[i], layer)}${flags}`, cls: 'pci-cell-info', field: 'layer' }
                 ]
             });
         });
@@ -532,8 +532,8 @@ function passRows(frame, device) {
                 indent: 1,
                 cells: [
                     { text: '', cls: 'pci-cell-index' },
-                    { text: 'light', cls: 'pci-cell-info' },
-                    { text: lightNode.name, cls: 'pci-cell-info', target: lightNode }
+                    { text: 'light', cls: 'pci-cell-info', field: 'kind' },
+                    { text: lightNode.name, cls: 'pci-cell-info', target: lightNode, field: 'light' }
                 ]
             });
         }

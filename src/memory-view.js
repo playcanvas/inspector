@@ -325,7 +325,7 @@ function bufferRow(buffer, users) {
         title,
         cells: [
             { text: name, cls: 'pci-cell-name' }, { text: notes.join(' · '), cls: 'pci-cell-info' },
-            { text: size, cls: 'pci-cell-info pci-cell-right' }
+            { text: size, cls: 'pci-cell-info pci-cell-right', field: 'size' }
         ]
     };
 }

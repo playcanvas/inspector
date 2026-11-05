@@ -24,6 +24,13 @@ import { collectProperties, describeValue } from './describe.js';
  * referenced, so that copying a huge scene cannot stall the page for long.
  * @property {(object: object) => boolean} [exclude] - Whether a child node belongs to the panel
  * rather than the app, such as the entity of its gizmo, and is left out with everything below it.
+ * @property {(object: object) => string} [idOf] - Gives every object copied, in full or as a
+ * reference, an id under `$id`, by which it can be looked up again later.
+ * @property {boolean} [code] - Whether to copy the source code of the object copied, such as the
+ * sources of a shader, rather than its summary. Defaults to true.
+ * @property {boolean} [backlinks] - Whether to keep what refers back to the objects copied, such
+ * as a node's parent and the lists of what uses an object, as references that are never followed.
+ * Defaults to false, which leaves them out.
  */
 
 /**
@@ -184,6 +191,24 @@ class JsonCopy {
     _exclude;
 
     /**
+     * @type {((object: object) => string)|null}
+     * @private
+     */
+    _idOf;
+
+    /**
+     * @type {boolean}
+     * @private
+     */
+    _backlinks;
+
+    /**
+     * @type {boolean}
+     * @private
+     */
+    _code;
+
+    /**
      * The objects copied in full so far, so that the next mention of one is a reference.
      *
      * @type {Set<object>}
@@ -222,6 +247,19 @@ class JsonCopy {
         this._opaque = options.opaque ?? (() => false);
         this._maxObjects = options.maxObjects ?? MAX_OBJECTS;
         this._exclude = options.exclude ?? (() => false);
+        this._idOf = options.idOf ?? null;
+        this._backlinks = options.backlinks ?? false;
+        this._code = options.code ?? true;
+    }
+
+    /**
+     * @param {object} obj - An object being copied.
+     * @returns {object} The start of its copy: its type, and its id when ids are given.
+     */
+    head(obj) {
+        const out = { $type: typeName(obj) };
+        if (this._idOf) out.$id = this._idOf(obj);
+        return out;
     }
 
     /**
@@ -269,7 +307,7 @@ class JsonCopy {
         this._copied.add(obj);
         this.objects++;
 
-        const out = { $type: typeName(obj) };
+        const out = this.head(obj);
         if (!content) {
             Object.assign(out, this.reflect(obj, level));
         } else if (isSections(content)) {
@@ -290,7 +328,7 @@ class JsonCopy {
      * @returns {object} What tells the object apart.
      */
     reference(obj, flag) {
-        const out = { $type: typeName(obj) };
+        const out = this.head(obj);
         for (const name of IDENTITY) {
             let value;
             try {
@@ -301,7 +339,7 @@ class JsonCopy {
             if (typeof value === 'string' || typeof value === 'number') out[name] = value;
         }
         // an object without a name of its own is told apart by its summary in the panel
-        if (Object.keys(out).length === 1) {
+        if (Object.keys(out).length === (this._idOf ? 2 : 1)) {
             const summary = describeValue(obj, 1).text;
             if (summary !== out.$type) out.$summary = summary;
         }
@@ -317,8 +355,9 @@ class JsonCopy {
     sections(sections, level) {
         const out = {};
         for (const section of sections) {
-            if (section.backlink) continue;
-            out[uniqueKey(out, section.title)] = this.rows(section.rows, level);
+            if (section.backlink && !this._backlinks) continue;
+            // what refers back is never followed, only referenced
+            out[uniqueKey(out, section.title)] = this.rows(section.rows, section.backlink ? Infinity : level);
         }
         return out;
     }
@@ -332,8 +371,8 @@ class JsonCopy {
         const out = {};
         for (const row of rows) {
             // the entries of a collection follow its row, which copies them from its value
-            if (row.depth || row.value.backlink) continue;
-            out[uniqueKey(out, row.label || row.key)] = this.described(row.value, level);
+            if (row.depth || (row.value.backlink && !this._backlinks)) continue;
+            out[uniqueKey(out, row.label || row.key)] = this.described(row.value, row.value.backlink ? Infinity : level);
         }
         return out;
     }
@@ -359,7 +398,7 @@ class JsonCopy {
         if (described.items) return this.items(described.items, level);
         if (obj) return this.link(obj, level + 1);
         // source code only for the object copied, as the sources of everything it reaches would bury it
-        if (typeof described.code === 'string' && level <= 0) return described.code;
+        if (typeof described.code === 'string' && level <= 0 && this._code) return described.code;
         return described.text;
     }
 
@@ -557,7 +596,7 @@ class JsonCopy {
         row.cells.forEach((cell, index) => {
             const value = cell.toggle ? !!cell.checked : cell.text;
             if (value === '') return;
-            const key = cell.cls?.match(/\bpci-cell-([a-z]+)/)?.[1] ?? String(index);
+            const key = cell.field ?? cell.cls?.match(/\bpci-cell-([a-z]+)/)?.[1] ?? String(index);
             if (key === 'name' && !named) return;
             out[uniqueKey(out, key)] = value;
         });

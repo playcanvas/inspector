@@ -17,6 +17,8 @@ const GUTTER_GAP = 2;
  * {@link ListView#onToggle} with the row's item and the new state, without selecting the row.
  * @property {boolean} [checked] - The state of a checkbox cell.
  * @property {boolean} [disabled] - Whether a checkbox cell is disabled.
+ * @property {string} [field] - What the cell holds, which copies key it by, for a cell whose
+ * class does not say, such as a size styled as info.
  */
 
 /**

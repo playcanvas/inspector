@@ -58,6 +58,13 @@ describe('Inspector JSON copy', function () {
         return { entity, material, texture };
     }
 
+    it('copies source code only when asked', function () {
+        const subject = new GraphNode('shader');
+        const sections = [{ key: 'src', title: 'Sources', rows: [{ key: 'vs', label: 'vertex', value: { text: '12 lines', code: 'void main() {}' } }] }];
+        expect(copySubject(subject, sections, { depth: 0 }).json.Sources.vertex).to.equal('void main() {}');
+        expect(copySubject(subject, sections, { depth: 0, code: false }).json.Sources.vertex).to.equal('12 lines');
+    });
+
     it('copies a value at full precision, under its label', function () {
         const node = new GraphNode('node');
         node.setLocalPosition(0.123456789, 2, -3);

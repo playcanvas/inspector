@@ -20,6 +20,7 @@ import {
 } from './material-view.js';
 import { buildMeshModel, meshBytes, meshListRows, meshNote, surveyMeshes } from './mesh-view.js';
 import { formatBytes, formatName, passDisplayName } from './model.js';
+import { TOOLS as MCP_TOOLS, validate as validateMcpArgs } from './mcp-tools.js';
 import { buildComponentModel, buildNodeModel, meshInstanceRows } from './node-model.js';
 import { PerfCapture } from './perf-capture.js';
 import { PerfCharts } from './perf-chart.js';
@@ -28,6 +29,7 @@ import { buildPerfModel, captureNorms, formatMs, isHitch } from './perf-view.js'
 import { AmmoDebugDraw, DEBUG_DRAW } from './physics-debug.js';
 import { bodyRows, drawCollisionShape, drawJoint, jointRows, physicsStats } from './physics-view.js';
 import { PropertyView } from './property-view.js';
+import { RefRegistry } from './ref-registry.js';
 import { buildScriptModel, isScriptClass, scriptListRows, surveyScripts } from './script-view.js';
 import { buildRenderTargetModel, formatChannels, isDepthFormat, previewAttachments, previewSupport, renderTargetRows, storedBottomUp } from './render-target-view.js';
 import { buildShaderModel, collectShaders, shaderRows, stateName } from './shader-view.js';
@@ -45,6 +47,7 @@ import { TRANSFORM_POINTER_EVENTS, TransformTool } from './transform-tool.js';
 /** @import { CopyOptions } from './copy-json.js' */
 /** @import { CopyTarget } from './property-view.js' */
 /** @import { TransformMode } from './transform-tool.js' */
+/** @import { McpHost, McpTool } from './mcp-tools.js' */
 
 /**
  * Options for {@link Inspector}.
@@ -66,13 +69,16 @@ import { TRANSFORM_POINTER_EVENTS, TransformTool } from './transform-tool.js';
  * @property {boolean} [record] - Whether to start recording frames for the Performance tab right
  * away, as if Record were pressed, so the capture begins with the first frame the app runs after
  * the inspector is created. Defaults to false. See {@link Inspector#recording}.
+ * @property {boolean} [mcp] - Whether to offer the inspector's read-only tools to AI agents right
+ * away, as if the MCP button was pressed. Defaults to false. A setting stored by the button takes
+ * precedence. See {@link Inspector#mcp}.
  * @property {(visible: boolean) => void} [onVisibleChange] - Called with the new visibility
  * whenever the panel is shown or hidden, whether through {@link Inspector#visible}, the toggle key
  * or the panel's own close button.
  * @property {string|null} [storageKey] - The local storage key the panel's settings are kept
  * under, so they survive a reload or a restart of the app: the physics drawing switch and options,
- * the bodies excluded from it (by entity path), the active tab, the panel width, the GPU
- * timings switch, and on the Performance tab the script timing switch, whether the CPU chart
+ * the bodies excluded from it (by entity path), the active tab, the panel width, the MCP switch,
+ * the GPU timings switch, and on the Performance tab the script timing switch, whether the CPU chart
  * includes the inspector's time, the charts collapsed and lines hidden, and the script types the
  * Scripts chart shows. Stored settings take
  * precedence over the defaults given here. Defaults to
@@ -1096,6 +1102,71 @@ class Inspector {
     _storageKey = 'pc-inspector';
 
     /**
+     * Whether the tools are offered to agents, see {@link Inspector#mcp}.
+     *
+     * @type {boolean}
+     * @private
+     */
+    _mcp = false;
+
+    /**
+     * Aborted to withdraw the tools registered with WebMCP.
+     *
+     * @type {AbortController|null}
+     * @private
+     */
+    _mcpAbort = null;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _mcpBtn;
+
+    /**
+     * The ids of the objects the tools return, which stay the same for the life of the inspector.
+     *
+     * @type {RefRegistry}
+     * @private
+     */
+    _refs = new RefRegistry();
+
+    /**
+     * What the tools read the app through.
+     *
+     * @type {McpHost}
+     * @private
+     */
+    _mcpHost = {
+        app: /** @type {any} */ (null),
+        refs: this._refs,
+        modelFor: (obj, subject) => this._mcpModel(obj, subject),
+        opaque: (obj) => {
+            this._mcpOpaque ??= this._opaqueObjects();
+            return this._mcpOpaque.has(obj);
+        },
+        exclude: obj => obj === this._transformTool?.root,
+        frame: () => {
+            this._mcpFrame ??= this._frozen && this._frame ? this._frame : captureFrameGraph(this._app);
+            return this._mcpFrame;
+        }
+    };
+
+    /**
+     * The frame graph and the app's own objects, found once per tool call.
+     *
+     * @type {*}
+     * @private
+     */
+    _mcpFrame = null;
+
+    /**
+     * @type {Set<object>|null}
+     * @private
+     */
+    _mcpOpaque = null;
+
+    /**
      * True while the panel is being built and restored, when nothing should be saved.
      *
      * @private
@@ -1171,7 +1242,10 @@ class Inspector {
         this._physicsDraw = false;
         this._setTab('hierarchy');
         this._storageKey = options.storageKey === undefined ? 'pc-inspector' : options.storageKey;
+        this._mcpHost.app = app;
+        this._mcp = !!options.mcp;
         this._loadSettings();
+        this._applyMcp();
         this._applyLayout();
         this._applyVisibility();
         this._applyPauseState();
@@ -1208,6 +1282,8 @@ class Inspector {
         this._picker = null;
 
         this.paused = false;
+        this._mcpAbort?.abort();
+        this._mcpAbort = null;
         this._perf.destroy();
         this._perfCharts.destroy();
         const profiler = app.graphicsDevice?.gpuProfiler;
@@ -1248,6 +1324,146 @@ class Inspector {
 
     get visible() {
         return this._visible;
+    }
+
+    /**
+     * Whether the inspector offers its tools to AI agents: tools that read the app as the panel
+     * shows it, the hierarchy, the lists of its tabs and any object by id, and never change it.
+     * Toggled by the MCP button of the toolbar, and kept on while the panel is hidden.
+     *
+     * While on, the tools are registered with WebMCP (`document.modelContext`) where the browser
+     * has it, for agents running in the browser, and can be called from the page through
+     * {@link Inspector#getTools} and {@link Inspector#executeTool}, for agents driving the page,
+     * such as through Puppeteer.
+     *
+     * @type {boolean}
+     */
+    set mcp(value) {
+        value = !!value;
+        if (value === this._mcp || this._destroyed) return;
+        this._mcp = value;
+        this._applyMcp();
+        this._saveSettings();
+    }
+
+    get mcp() {
+        return this._mcp;
+    }
+
+    /**
+     * Whether the browser has WebMCP, through which agents running in the browser find the tools
+     * of {@link Inspector#mcp}. Without it, the tools are still offered through
+     * {@link Inspector#executeTool}.
+     *
+     * @type {boolean}
+     */
+    static get webMcpSupported() {
+        return typeof document !== 'undefined' && typeof /** @type {any} */ (document).modelContext?.registerTool === 'function';
+    }
+
+    /**
+     * The tools offered while {@link Inspector#mcp} is on, described the way MCP describes them.
+     *
+     * @returns {McpTool[]} The tools, none while it is off.
+     */
+    getTools() {
+        if (!this._mcp) return [];
+        return MCP_TOOLS.map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations }));
+    }
+
+    /**
+     * Calls one of the tools of {@link Inspector#getTools}.
+     *
+     * @param {string} name - The name of the tool.
+     * @param {object} [args] - Its arguments, as its input schema describes them.
+     * @returns {Promise<*>} The result, as JSON-ready data. Rejects when the tools are off, the tool
+     * is unknown or the arguments are wrong.
+     * @example
+     * inspector.mcp = true;
+     * const { entities } = await inspector.executeTool('playcanvas_find_entities', { name: 'Robot' });
+     * const robot = await inspector.executeTool('playcanvas_get', { id: entities[0].$id });
+     */
+    async executeTool(name, args = {}) {
+        if (!this._mcp) throw new Error('The inspector\'s MCP tools are off');
+        const tool = MCP_TOOLS.find(t => t.name === name);
+        if (!tool) throw new Error(`Unknown tool "${name}"`);
+        validateMcpArgs(tool, args ?? {});
+        try {
+            return await tool.execute(this._mcpHost, args ?? {});
+        } finally {
+            this._mcpFrame = null;
+            this._mcpOpaque = null;
+        }
+    }
+
+    /**
+     * Registers the tools with WebMCP while {@link Inspector#mcp} is on, withdraws them while it is
+     * off, and shows the state on the toolbar button.
+     *
+     * @private
+     */
+    _applyMcp() {
+        if (this._mcp && !this._mcpAbort) {
+            this._mcpAbort = new AbortController();
+            const context = Inspector.webMcpSupported ? /** @type {any} */ (document).modelContext : null;
+            if (context) {
+                const signal = this._mcpAbort.signal;
+                for (const { name, description, inputSchema, annotations } of MCP_TOOLS) {
+                    // a failure is returned as an error result rather than thrown, as the browser
+                    // hands the agent a generic error in place of a thrown one's message
+                    const execute = async (args) => {
+                        try {
+                            const result = await this.executeTool(name, args);
+                            return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+                        } catch (e) {
+                            return { content: [{ type: 'text', text: `${e?.message ?? e}` }], isError: true };
+                        }
+                    };
+                    // registering returns a promise, which rejects on a name already registered,
+                    // such as by a second inspector in the page
+                    Promise.resolve()
+                    .then(() => context.registerTool({ name, description, inputSchema, annotations, execute }, { signal }))
+                    .catch(e => console.warn(`Inspector: could not register the WebMCP tool ${name}: ${e?.message ?? e}`));
+                }
+            }
+        } else if (!this._mcp && this._mcpAbort) {
+            this._mcpAbort.abort();
+            this._mcpAbort = null;
+        }
+
+        if (this._mcpBtn) {
+            this._mcpBtn.classList.toggle('pci-active', this._mcp);
+            const how = Inspector.webMcpSupported ?
+                'registered with WebMCP, and callable from the page through executeTool' :
+                'callable from the page through executeTool. This browser has no WebMCP, so agents in the browser do not see them';
+            setTip(this._mcpBtn, this._mcp ?
+                `MCP on: read-only tools for AI agents are ${how}. They stay on while the panel is hidden. Click to turn them off` :
+                'MCP: offer read-only tools to AI agents, which read the hierarchy, the lists of the tabs and any object by id, and never change the app');
+        }
+    }
+
+    /**
+     * The model the tools show an object with: for the object asked for, what its tab shows,
+     * with the lists of what uses it; for an object reached through a link, what a copy follows,
+     * see {@link Inspector#_copyModel}. Neither narrows to the filter of the panel.
+     *
+     * @param {object} obj - The object.
+     * @param {boolean} subject - Whether it is the object asked for.
+     * @returns {PropertySection[]|PropertyRow[]|null} The model, or null for an object no tab shows.
+     * @private
+     */
+    _mcpModel(obj, subject) {
+        const ctx = { ...this._context(), frame: this._mcpHost.frame(), filter: '' };
+        if (!subject) return this._copyModel(obj, { ...ctx, backlinks: false });
+        if (obj instanceof Texture) return [...buildTextureModel(obj, ctx), usedByMaterialsSection(materialsUsingTexture(this._app, obj))];
+        if (obj instanceof Shader) return [...buildShaderModel(obj), usedByMaterialsSection(materialsUsingShader(this._app, obj))];
+        if (obj instanceof Asset) {
+            const sections = buildAssetModel(obj, ctx);
+            const users = sections.find(section => section.key === 'users');
+            if (users) pushResourceUsage(users, obj, this._app);
+            return sections;
+        }
+        return this._copyModel(obj, { ...ctx, backlinks: true });
     }
 
     /**
@@ -1929,7 +2145,13 @@ class Inspector {
         this._debugEl = el('span', 'pci-paused');
         this._modeEl = el('span', 'pci-paused');
         this._pathEl = el('span', 'pci-path');
-        status.append(this._countsEl, this._pausedEl, this._debugEl, this._modeEl, this._pathEl);
+        // the MCP switch sits here rather than on the toolbar, which has no room left, and shows
+        // while it is on that the app is open to agents
+        this._mcpBtn = /** @type {HTMLButtonElement} */ (el('button', 'pci-mcp', 'MCP'));
+        this._mcpBtn.addEventListener('click', () => {
+            this.mcp = !this._mcp;
+        });
+        status.append(this._countsEl, this._pausedEl, this._debugEl, this._modeEl, this._pathEl, this._mcpBtn);
 
         // width handle on the inner edge
         const edge = el('div', 'pci-edge');
@@ -2148,6 +2370,7 @@ class Inspector {
         }
         if (typeof stored.assetSort === 'string') this._assetSort.value = stored.assetSort;
         if (typeof stored.copyDepth === 'number') this._setCopyDepth(stored.copyDepth);
+        if (typeof stored.mcp === 'boolean') this._mcp = stored.mcp;
         if (typeof stored.filterBy === 'string') {
             this._filterBy.value = stored.filterBy;
             this._hierarchy.filterBy = /** @type {any} */ (this._filterBy.value);
@@ -2193,7 +2416,8 @@ class Inspector {
                 texturePreview: { enabled: this._texturePreviewToggle.checked, channels: this._textureChannels.value },
                 assetSort: this._assetSort.value,
                 filterBy: this._filterBy.value,
-                copyDepth: this._copyDepth
+                copyDepth: this._copyDepth,
+                mcp: this._mcp
             }));
         } catch (e) {
             // storage unavailable or full: settings simply do not persist
