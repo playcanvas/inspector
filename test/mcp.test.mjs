@@ -100,7 +100,7 @@ describe('Inspector MCP tools', function () {
     it('describes read-only tools while on', function () {
         inspector = new Inspector(app, { storageKey: null, mcp: true });
         const tools = inspector.getTools();
-        expect(tools.map(t => t.name)).to.deep.equal(['playcanvas_app_summary', 'playcanvas_find_entities', 'playcanvas_list', 'playcanvas_get']);
+        expect(tools.map(t => t.name)).to.deep.equal(['playcanvas_app_summary', 'playcanvas_index', 'playcanvas_find_entities', 'playcanvas_list', 'playcanvas_get']);
         for (const tool of tools) {
             expect(tool.annotations.readOnlyHint).to.be.true;
             expect(tool.inputSchema.type).to.equal('object');
@@ -116,6 +116,23 @@ describe('Inspector MCP tools', function () {
         expect(summary.device.type).to.equal('null');
         expect(summary.root).to.match(/^node:/);
         expect(summary.lists).to.include('textures');
+    });
+
+    it('indexes every entity and every object the lists hold in one call, with ids to get', async function () {
+        inspector = new Inspector(app, { storageKey: null, mcp: true });
+        const index = await inspector.executeTool('playcanvas_index');
+        expect(index.summary.entities).to.equal(4);
+        // the root is the summary's
+        expect(index.entities.entries.map(e => e.path)).to.deep.equal(['robot', 'robot/robot arm', 'ground']);
+        expect(index.entities.entries[0].components).to.deep.equal(['render']);
+        expect(index.entities.truncated).to.be.false;
+        expect(index).to.include.keys('cameras', 'materials', 'textures', 'shaders', 'meshes', 'renderTargets', 'scripts', 'assets', 'passes');
+        expect(index).to.not.have.property('memory');
+
+        const tex = index.textures.entries.find(e => e.name === 'albedo');
+        expect(inspector._refs.get(tex.$id)).to.equal(texture);
+        const robotEntry = await inspector.executeTool('playcanvas_get', { id: index.entities.entries[0].$id });
+        expect(robotEntry.Entity.name).to.equal('robot');
     });
 
     it('finds entities by name, component and tag', async function () {
@@ -178,6 +195,8 @@ describe('Inspector MCP tools', function () {
         expect(textures.total).to.equal(1);
         expect(textures.entries[0].$type).to.equal('Texture');
         expect(textures.entries[0].name).to.equal('albedo');
+        expect(textures.entries[0].size).to.equal('84 B');
+        expect(textures.entries[0]).to.not.have.property('info (2)');
         const tex = await inspector.executeTool('playcanvas_get', { id: textures.entries[0].$id });
         expect(tex.$type).to.equal('Texture');
         expect(inspector._refs.get(textures.entries[0].$id)).to.equal(texture);
@@ -248,7 +267,7 @@ describe('Inspector MCP tools', function () {
         await new Promise((resolve) => {
             setTimeout(resolve, 0);
         });
-        expect(registered.map(r => r.tool.name)).to.have.lengthOf(4);
+        expect(registered.map(r => r.tool.name)).to.have.lengthOf(5);
         expect(registered[0].tool.annotations.readOnlyHint).to.be.true;
 
         inspector.visible = false;

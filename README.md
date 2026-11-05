@@ -208,6 +208,7 @@ The tools only read the app and never change it:
 | Tool | What it returns |
 | --- | --- |
 | `playcanvas_app_summary` | The engine version, graphics device and video memory, entity and asset counts, frame stats |
+| `playcanvas_index` | Everything in one call: the summary, every entity with its path and components, and every camera, material, texture, shader, mesh, render target, script, asset and pass with its figures |
 | `playcanvas_find_entities` | Entities by name, component type, script name and tag |
 | `playcanvas_list` | What a tab lists: `textures`, `shaders`, `materials`, `meshes`, `scripts`, `cameras`, `assets`, `renderTargets`, `passes` (the frame graph) or `memory` |
 | `playcanvas_get` | Any object by id, as its tab shows it |
@@ -281,6 +282,12 @@ npm run publint     # checks the package is publishable
 WebMCP on, opens the inspector example of the engine's examples browser on port 5620, clicks **MCP**
 and runs a chain of calls. `node e2e/webmcp.mjs --url <page> --calls '<json>'` runs other calls on
 another page; see the top of `e2e/webmcp.mjs`.
+
+`node e2e/webmcp.mjs --dump <dir>` writes everything the app holds to files, for an agent to search
+rather than read: `index.json`, then a file per kind (`entities.json`, `materials.json`,
+`shaders.json` with their sources, `meshInstances.json` and so on) holding every object as
+`playcanvas_get` returns it, keyed by its `$id`, so the links between objects resolve across the
+files. A `README.md` in the directory describes them.
 
 The tests run against the `playcanvas` version in `devDependencies`, on the engine's null graphics
 device under jsdom.

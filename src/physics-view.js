@@ -103,7 +103,7 @@ function bodyRows(app, hidden, drawing) {
                 { text: rigidbody.type, cls: 'pci-cell-tag pci-cell-tag-info' },
                 { text: shapeText(entity.collision), cls: 'pci-cell-info' },
                 { text: dynamic ? `${formatNumber(rigidbody.mass)} kg` : '', cls: 'pci-cell-info' },
-                { text: `${state}${speed}`, cls: 'pci-cell-info pci-cell-right' }
+                { text: `${state}${speed}`, cls: 'pci-cell-info pci-cell-right', field: 'state' }
             ]
         };
     });
@@ -151,7 +151,7 @@ function jointRows(app) {
                 { text: '↔', cls: 'pci-cell-info' },
                 { text: b ? b.name : 'world', cls: 'pci-cell-info', target: b ?? undefined },
                 { text: flags, cls: 'pci-cell-info' },
-                { text: broken ? 'broken' : (joint.enabled ? 'active' : 'disabled'), cls: 'pci-cell-info pci-cell-right' }
+                { text: broken ? 'broken' : (joint.enabled ? 'active' : 'disabled'), cls: 'pci-cell-info pci-cell-right', field: 'state' }
             ]
         };
     });

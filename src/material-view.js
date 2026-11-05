@@ -100,7 +100,7 @@ function materialListRows(survey) {
         const counts = `${instances} instance${instances === 1 ? '' : 's'} · ${textures} texture${textures === 1 ? '' : 's'} · ` +
             `${variants} variant${variants === 1 ? '' : 's'}`;
         cells.push({ text: counts, cls: 'pci-cell-info' });
-        cells.push({ text: `#${material.id}`, cls: 'pci-cell-info pci-cell-right' });
+        cells.push({ text: `#${material.id}`, cls: 'pci-cell-info pci-cell-right', field: 'id' });
         const title = `${typeOf(material)} "${name}" #${material.id}\n` +
             `${instances} mesh instance${instances === 1 ? '' : 's'}, ${textures} texture${textures === 1 ? '' : 's'}, ` +
             `${variants} compiled variant${variants === 1 ? '' : 's'}` +

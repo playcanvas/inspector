@@ -110,7 +110,7 @@ function renderTargetRows(device, frame) {
         const cells = [{ text: name, cls: 'pci-cell-name' }];
         if (rt === device.backBuffer) cells.push({ text: 'backbuffer', cls: 'pci-cell-tag pci-cell-tag-info' });
         cells.push({ text: `${rt.width}×${rt.height} ${attachmentsText(rt, device)}${rt.samples > 1 ? ` ×${rt.samples}` : ''}`, cls: 'pci-cell-info' });
-        cells.push({ text: uses ? `${uses} pass${uses === 1 ? '' : 'es'}` : 'unused this frame', cls: 'pci-cell-info pci-cell-right' });
+        cells.push({ text: uses ? `${uses} pass${uses === 1 ? '' : 'es'}` : 'unused this frame', cls: 'pci-cell-info pci-cell-right', field: 'passes' });
 
         return { key: keyOf(rt), item: rt, name, dim: uses === 0, title: targetTitle(rt, device), cells };
     });

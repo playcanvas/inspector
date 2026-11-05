@@ -58,6 +58,10 @@ import { textureRows } from './texture-view.js';
 const MAX_LIMIT = 500;
 const MAX_DEPTH = 4;
 
+// the lists an index holds, and the most entries of each, so even a huge app gives a bounded index
+const INDEX_LISTS = ['cameras', 'materials', 'textures', 'shaders', 'meshes', 'renderTargets', 'scripts', 'assets', 'passes'];
+const MAX_INDEX_ENTRIES = 2000;
+
 // how many objects a get copies in full, so a deep get of a big scene stays a sensible size
 const MAX_GET_OBJECTS = 2000;
 
@@ -248,17 +252,15 @@ function findEntities(host, args) {
 
 /**
  * @param {McpHost} host - The host.
- * @param {any} args - Which list, and which part of it.
- * @returns {object} The entries.
+ * @param {string} kind - Which list, one of {@link LISTS}.
+ * @param {string} filter - The lower-cased text names must contain, or empty for every entry.
+ * @param {number} offset - How many matching entries to skip.
+ * @param {number} limit - The most entries to return.
+ * @returns {{ total: number, entries: object[] }} The entries, and how many match in all.
  */
-function list(host, args) {
-    const make = LISTS[args?.kind];
-    if (!make) throw new Error(`Unknown list "${args?.kind}". One of: ${Object.keys(LISTS).join(', ')}`);
-    const filter = typeof args?.filter === 'string' ? args.filter.toLowerCase() : '';
-    const offset = clampInt(args?.offset, 0, Number.MAX_SAFE_INTEGER);
-    const limit = clampInt(args?.limit, 100, MAX_LIMIT);
-
-    const keyed = KEYED_LISTS.has(args.kind);
+function listEntries(host, kind, filter, offset, limit) {
+    const make = LISTS[kind];
+    const keyed = KEYED_LISTS.has(kind);
     const entries = [];
     let total = 0;
     let group = null;
@@ -281,11 +283,58 @@ function list(host, args) {
         const figures = copyListRow(row).json;
         // a row naming no object of its own, such as a step of a pass, is named by what it belongs to
         if (!figures.name && row.name) entry.name = row.name;
-        // the separators the panel puts between cells mean nothing here
-        for (const [key, value] of Object.entries(figures)) entry[key] = typeof value === 'string' ? value.replace(/^·\s*/, '') : value;
+        for (const [key, value] of Object.entries(figures)) {
+            // the separators the panel puts between cells mean nothing here
+            const text = typeof value === 'string' ? value.replace(/^·\s*/, '') : value;
+            // a row's tags, such as 'skinned' and 'morph', make one list
+            if (/^tag(?: \(\d+\))?$/.test(key)) (entry.tags ??= []).push(text);
+            else entry[key] = text;
+        }
         entries.push(entry);
     }
+    return { total, entries };
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @param {any} args - Which list, and which part of it.
+ * @returns {object} The entries.
+ */
+function list(host, args) {
+    if (!LISTS[args?.kind]) throw new Error(`Unknown list "${args?.kind}". One of: ${Object.keys(LISTS).join(', ')}`);
+    const filter = typeof args?.filter === 'string' ? args.filter.toLowerCase() : '';
+    const offset = clampInt(args?.offset, 0, Number.MAX_SAFE_INTEGER);
+    const limit = clampInt(args?.limit, 100, MAX_LIMIT);
+    const { total, entries } = listEntries(host, args.kind, filter, offset, limit);
     return { kind: args.kind, total, offset, entries, truncated: offset + entries.length < total };
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @returns {object} Everything the app holds, an entry each with its id: the summary, every
+ * entity with its path and components, and the entries of every list but memory.
+ */
+function index(host) {
+    const entities = [];
+    let total = 0;
+    const visit = (node) => {
+        if (host.exclude(node)) return;
+        // the root is the summary's, and has no path
+        if (node !== host.app.root && total++ < MAX_INDEX_ENTRIES) {
+            const entry = { $id: host.refs.idOf(node), path: node.path, components: componentsOf(node) };
+            if (!node.enabled) entry.enabled = false;
+            entities.push(entry);
+        }
+        for (const child of node.children) visit(child);
+    };
+    visit(host.app.root);
+
+    const out = { summary: appSummary(host), entities: { total, entries: entities, truncated: total > entities.length } };
+    for (const kind of INDEX_LISTS) {
+        const result = listEntries(host, kind, '', 0, MAX_INDEX_ENTRIES);
+        out[kind] = { total: result.total, entries: result.entries, truncated: result.total > result.entries.length };
+    }
+    return out;
 }
 
 /**
@@ -326,6 +375,15 @@ const TOOLS = [{
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: true },
     execute: appSummary
+}, {
+    name: 'playcanvas_index',
+    description: 'Index everything the app holds in one call, to start from: the summary, every entity with its ' +
+        'id, path and components, and every camera, material, texture, shader, mesh, render target, script class, ' +
+        'asset and frame-graph pass with its id and the figures its list shows, such as size and format. Pass ' +
+        'the ids to playcanvas_get for the details. Each list holds up to 2000 entries.',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true },
+    execute: index
 }, {
     name: 'playcanvas_find_entities',
     description: 'Find entities in the scene hierarchy by name, component type, script name and tag, all ' +

@@ -164,7 +164,7 @@ function meshListRows(survey) {
         if (mesh.skin) cells.push({ text: 'skinned', cls: 'pci-cell-tag pci-cell-tag-info' });
         if (mesh.morph) cells.push({ text: 'morph', cls: 'pci-cell-tag pci-cell-tag-info' });
         cells.push({ text: `${geometryText(mesh)} · ${instances} instance${instances === 1 ? '' : 's'}`, cls: 'pci-cell-info' });
-        cells.push({ text: formatBytes(meshBytes(mesh)), cls: 'pci-cell-info pci-cell-right' });
+        cells.push({ text: formatBytes(meshBytes(mesh)), cls: 'pci-cell-info pci-cell-right', field: 'size' });
         const title = `Mesh #${mesh.id}\n${geometryText(mesh)}, ${formatBytes(meshBytes(mesh))}\n` +
             `${instances ? `drawn by ${instances} mesh instance${instances === 1 ? '' : 's'}` : 'drawn by no mesh instance'}` +
             `${users.length > instances ? `, held by ${users[users.length - 1].label}` : ''}`;
