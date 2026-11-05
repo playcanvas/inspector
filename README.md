@@ -317,6 +317,20 @@ and script timing where the app has them, prints the summary and writes `capture
 as copying the capture gives it), `summary.json` and a CSV per series (`series-cpu.csv`,
 `series-gpu.csv` and so on) into the directory, or into the `--dump` directory.
 
+`--perf-dump [dir]` writes the same files from the capture the Performance tab already holds, without
+recording, such as one recorded with its Record button. As the script otherwise opens a page of its
+own, record in one of these:
+
+- `--wait` opens a window and waits for Enter in the terminal, so you can record there first.
+- `--connect <url>` uses a Chrome you already run, started with
+  `--remote-debugging-port=9222 --user-data-dir=<dir> --enable-features=WebMCP`, given as
+  `http://127.0.0.1:9222`. It picks the tab with the inspector (or the one whose URL contains
+  `--url`'s value) and leaves Chrome running.
+
+```sh
+node e2e/webmcp.mjs --connect http://127.0.0.1:9222 --perf-dump ./capture
+```
+
 The tests run against the `playcanvas` version in `devDependencies`, on the engine's null graphics
 device under jsdom.
 
