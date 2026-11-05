@@ -1,10 +1,11 @@
 import {
-    AssetRegistry, Entity, EventHandler, GraphNode, Mesh, MeshInstance, NullGraphicsDevice, PIXELFORMAT_RGBA8, StandardMaterial, Texture
+    AssetRegistry, Entity, EventHandler, GraphNode, Mesh, MeshInstance, NullGraphicsDevice, PIXELFORMAT_RGBA8, RenderTarget, StandardMaterial, Texture
 } from 'playcanvas';
 
 import { expect } from 'chai';
 
 import { Inspector } from '../src/inspector.js';
+import { fitSize, textureSampling } from '../src/image-capture.js';
 import { RefRegistry } from '../src/ref-registry.js';
 import { jsdomSetup, jsdomTeardown } from './jsdom.mjs';
 
@@ -103,15 +104,118 @@ describe('Inspector MCP tools', function () {
         expect(tools.map(t => t.name)).to.deep.equal([
             'playcanvas_app_summary', 'playcanvas_index', 'playcanvas_find_entities', 'playcanvas_list', 'playcanvas_get',
             'playcanvas_perf_record', 'playcanvas_perf_stop', 'playcanvas_perf_status', 'playcanvas_perf_summary',
-            'playcanvas_perf_frame', 'playcanvas_perf_series'
+            'playcanvas_perf_frame', 'playcanvas_perf_series', 'playcanvas_logs', 'playcanvas_screenshot',
+            'playcanvas_pause', 'playcanvas_step'
         ]);
+        const changing = ['playcanvas_perf_record', 'playcanvas_perf_stop', 'playcanvas_pause', 'playcanvas_step'];
         for (const tool of tools) {
-            const changes = tool.name === 'playcanvas_perf_record' || tool.name === 'playcanvas_perf_stop';
+            const changes = changing.includes(tool.name);
             expect(tool.annotations.readOnlyHint).to.equal(!changes);
             if (changes) expect(tool.annotations.destructiveHint).to.be.false;
             expect(tool.inputSchema.type).to.equal('object');
             expect(tool).to.not.have.property('execute');
         }
+    });
+
+    it('keeps what the page logs while on, counts repeats, and puts the console back when off', async function () {
+        const warn = console.warn;
+        const error = console.error;
+        const log = console.log;
+        // keep the test output quiet: the capture wraps whatever the console methods are
+        console.warn = console.error = console.log = () => {};
+        try {
+            app.frame = 7;
+            const subject = new Inspector(app, { storageKey: null });
+            inspector = subject;
+            console.warn('before the tools');
+            subject.mcp = true;
+            console.log('%cstyled %s: %d%%', 'color: red', 'level', 7.9, 'text');
+            console.warn('shader', { id: 3 });
+            console.warn('shader', { id: 3 });
+            console.error(new Error('broken'));
+
+            const all = await subject.executeTool('playcanvas_logs');
+            expect(all.capturing).to.be.true;
+            expect(all.entries.map(e => [e.level, e.text, e.count])).to.deep.equal([
+                ['log', 'styled level: 7% text', 1], ['warn', 'shader {"id":3}', 2], ['error', 'Error: broken', 1]
+            ]);
+            expect(all.entries[0].frame).to.equal(7);
+            expect(all.counts).to.include({ error: 1, warn: 2, log: 1 });
+
+            const warnings = await subject.executeTool('playcanvas_logs', { level: 'warn' });
+            expect(warnings.entries.map(e => e.level)).to.deep.equal(['warn', 'error']);
+            const after = await subject.executeTool('playcanvas_logs', { since: all.entries[1].seq });
+            expect(after.entries.map(e => e.text)).to.deep.equal(['Error: broken']);
+            // the counts cover what was logged after since, not everything kept
+            expect(after.counts).to.include({ error: 1, warn: 0, log: 0 });
+            expect((await subject.executeTool('playcanvas_logs', { filter: 'SHADER' })).total).to.equal(1);
+
+            const wrapper = console.warn;
+            subject.mcp = false;
+            expect(console.warn).to.not.equal(wrapper);
+            console.warn('after the tools');
+            expect(subject._mcpHost.logs.entries).to.have.lengthOf(3);
+        } finally {
+            inspector?.destroy();
+            console.warn = warn;
+            console.error = error;
+            console.log = log;
+        }
+    });
+
+    it('pauses, steps a number of frames and holds the app paused', async function () {
+        inspector = new Inspector(app, { storageKey: null, mcp: true });
+        app.frame = 10;
+        expect(await inspector.executeTool('playcanvas_pause', { paused: true })).to.deep.equal({ paused: true, frame: 10 });
+        expect(app.timeScale).to.equal(0);
+
+        const stepping = inspector.executeTool('playcanvas_step', { frames: 3 });
+        await Promise.resolve();
+        expect(app.timeScale).to.equal(1);
+        for (let i = 0; i < 3; i++) {
+            app.frame++;
+            app.fire('frameend');
+        }
+        const result = await stepping;
+        expect(result).to.include({ paused: true, stepped: 3, from: 10, frame: 13 });
+        expect(app.timeScale).to.equal(0);
+
+        expect(await inspector.executeTool('playcanvas_pause', { paused: false })).to.include({ paused: false });
+        expect(app.timeScale).to.equal(1);
+    });
+
+    it('steps fewer frames when they stop coming, and says so', async function () {
+        inspector = new Inspector(app, { storageKey: null, mcp: true });
+        const result = await inspector.executeTool('playcanvas_step', { frames: 2, timeout: 1 });
+        expect(result.stepped).to.equal(0);
+        expect(result.note).to.match(/Only 0 of 2 frames/);
+        expect(inspector.paused).to.be.true;
+    });
+
+    it('takes screenshots of textures and render targets only, and checks the channels', async function () {
+        inspector = new Inspector(app, { storageKey: null, mcp: true });
+        const failure = async (args) => {
+            let error;
+            await inspector.executeTool('playcanvas_screenshot', args).catch((e) => {
+                error = e;
+            });
+            return error?.message;
+        };
+        expect(await failure({ id: inspector._refs.idOf(material) })).to.match(/takes the id of a texture or a render target/);
+        expect(await failure({ id: inspector._refs.idOf(texture), channels: 'rgbx' })).to.match(/"channels" must match/);
+        const rt = new RenderTarget({ colorBuffer: texture, depth: false });
+        expect(await failure({ id: inspector._refs.idOf(rt), attachment: 'depth' })).to.match(/has no depth attachment/);
+    });
+
+    it('samples textures for a capture the way the previews do, and fits images inside a size', function () {
+        const device = app.graphicsDevice;
+        expect(textureSampling(texture, device, 'rgb')).to.deep.include({ mode: 'filtered', encoding: texture.encoding });
+        expect(textureSampling(texture, device, 'aaa').encoding).to.equal('raw');
+        expect(Array.from(textureSampling(texture, device, 'aaa').channelIndices)).to.deep.equal([3, 3, 3]);
+        const cube = new Texture(device, { width: 4, height: 4, cubemap: true });
+        expect(textureSampling(cube, device, 'rgb')).to.match(/Only 2D color and depth textures/);
+        expect(fitSize(3073, 1000, 512)).to.deep.equal({ width: 512, height: 167 });
+        expect(fitSize(64, 32, 512)).to.deep.equal({ width: 64, height: 32 });
     });
 
     it('summarizes the app', async function () {
@@ -273,7 +377,7 @@ describe('Inspector MCP tools', function () {
         await new Promise((resolve) => {
             setTimeout(resolve, 0);
         });
-        expect(registered.map(r => r.tool.name)).to.have.lengthOf(11);
+        expect(registered.map(r => r.tool.name)).to.have.lengthOf(15);
         expect(registered[0].tool.annotations.readOnlyHint).to.be.true;
 
         inspector.visible = false;
