@@ -1285,6 +1285,28 @@ ${ICON_RULES}
         text-overflow: ellipsis;
         text-align: right;
     }
+
+    .pci-status .pci-mcp {
+        flex: 0 0 auto;
+        padding: 0 6px;
+        border: 1px solid var(--pci-border-strong);
+        border-radius: 3px;
+        background: none;
+        color: var(--pci-text-muted);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .pci-status .pci-mcp:hover {
+        color: var(--pci-text);
+    }
+
+    .pci-status .pci-mcp.pci-active {
+        border-color: var(--pci-accent);
+        background: var(--pci-accent);
+        color: var(--pci-bg);
+    }
 `;
 
 export { BRACKET_COLORS, INDENT_COLORS, styles };

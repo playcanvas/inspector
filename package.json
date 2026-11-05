@@ -44,12 +44,13 @@
     }
   },
   "scripts": {
-    "lint": "eslint src test",
-    "lint:fix": "eslint --fix src test",
+    "lint": "eslint src test e2e",
+    "lint:fix": "eslint --fix src test e2e",
     "publint": "publint",
     "test": "mocha --recursive test --timeout 5000",
     "build:types": "tsc",
-    "test:types": "tsc -p test/types"
+    "test:types": "tsc -p test/types",
+    "test:webmcp": "node e2e/webmcp.mjs --headless"
   },
   "peerDependencies": {
     "playcanvas": "^2.23.0"
@@ -63,6 +64,7 @@
     "mocha": "12.0.2",
     "playcanvas": "2.23.0",
     "publint": "0.3.24",
+    "puppeteer-core": "25.11.0",
     "typescript": "5.9.3"
   }
 }

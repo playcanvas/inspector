@@ -119,7 +119,7 @@ function textureRows(device) {
         const cells = [{ text: name, cls: 'pci-cell-name' }];
         if (owners.has(texture)) cells.push({ text: 'target', cls: 'pci-cell-tag pci-cell-tag-info' });
         cells.push({ text: `${shapeText(texture)} ${formatName(texture.format)}${texture.mipmaps ? ' mips' : ''}`, cls: 'pci-cell-info' });
-        cells.push({ text: formatBytes(texture.gpuSize), cls: 'pci-cell-info pci-cell-right' });
+        cells.push({ text: formatBytes(texture.gpuSize), cls: 'pci-cell-info pci-cell-right', field: 'size' });
         const title = `${name} ${shapeText(texture)} ${formatName(texture.format)}\n${formatBytes(texture.gpuSize)}${texture.mipmaps ? `, ${texture.numLevels} mip levels` : ''}`;
         return { key: keyOf(texture), item: texture, name, title, cells };
     });

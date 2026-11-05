@@ -235,7 +235,7 @@ function shaderRows(device) {
         cells.push({ text: languageName(shader), cls: 'pci-cell-tag pci-cell-tag-info' });
         if (compute) cells.push({ text: 'compute', cls: 'pci-cell-tag pci-cell-tag-info' });
         if (shader.failed) cells.push({ text: 'failed', cls: 'pci-cell-tag' });
-        cells.push({ text: `#${shader.id}`, cls: 'pci-cell-info pci-cell-right' });
+        cells.push({ text: `#${shader.id}`, cls: 'pci-cell-info pci-cell-right', field: 'id' });
         return { key: `shader${shader.id}`, item: shader, name, dim: !shader.ready, title: `${shader.label}\n${stateName(shader)}`, cells };
     });
 }

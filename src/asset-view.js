@@ -248,7 +248,7 @@ function assetRows(registry, sort) {
         cells.push({ text: asset.type, cls: 'pci-cell-tag pci-cell-tag-info' });
         if (!asset.loaded) cells.push({ text: stateName(asset), cls: 'pci-cell-tag' });
         cells.push({ text: size, cls: 'pci-cell-info' });
-        cells.push({ text: `#${asset.id}`, cls: 'pci-cell-info pci-cell-right' });
+        cells.push({ text: `#${asset.id}`, cls: 'pci-cell-info pci-cell-right', field: 'id' });
         const title = `${name}\n${asset.type}, ${stateName(asset)}, ${size}` +
             `${parent ? `\nin container "${parent.name}"` : asset.file?.url ? `\n${asset.file.url}` : ''}`;
         return { key: `asset${asset.id}`, item: asset, name, dim: !asset.loaded, title, cells };
