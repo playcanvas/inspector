@@ -193,6 +193,55 @@ per frame, as JSON or as CSV for a spreadsheet; both cover the frames selected t
 are any. Right-click a frame in the charts to copy it, inside the frames selected together to copy
 their figures, and the timeline to copy its bars.
 
+### AI agents (MCP)
+
+Click **MCP** at the right end of the status bar to let AI agents read the app. It turns orange
+while on, is remembered with the other settings, and keeps working while the panel is hidden. Or
+turn it on from code:
+
+```javascript
+const inspector = new Inspector(app, { mcp: true });
+```
+
+The tools only read the app and never change it:
+
+| Tool | What it returns |
+| --- | --- |
+| `playcanvas_app_summary` | The engine version, graphics device and video memory, entity and asset counts, frame stats |
+| `playcanvas_find_entities` | Entities by name, component type, script name and tag |
+| `playcanvas_list` | What a tab lists: `textures`, `shaders`, `materials`, `meshes`, `scripts`, `cameras`, `assets`, `renderTargets`, `passes` (the frame graph) or `memory` |
+| `playcanvas_get` | Any object by id, as its tab shows it |
+
+Every object returned carries an `$id`, such as `material:12`, which `playcanvas_get` takes, so an
+agent follows links from one object to the next: an entity to its mesh instances, their material,
+its shader, and back through the materials using that shader. `depth` copies linked objects in place,
+up to 4 links away. Shader sources are left out unless `sources` is true. Ids stay the same for the
+life of the inspector.
+
+Each tool describes itself with a description and a JSON schema of its arguments, which is all an
+agent needs to use it. While MCP is on, the tools are offered two ways:
+
+- **WebMCP**, where the browser has it (Chrome 150+ with `--enable-features=WebMCP`): the tools are
+  registered with `document.modelContext`, where agents running in the browser find them. To use
+  them from Claude Code or another MCP client, add
+  [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) with its WebMCP tools
+  on, which launches Chrome with the flag:
+
+  ```sh
+  claude mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest --categoryExperimentalWebmcp --chromeArg=--enable-features=WebMCP
+  ```
+
+  Then ask the agent to open the page, click **MCP**, and use `list_webmcp_tools` and
+  `execute_webmcp_tool`.
+- **From the page**, in any browser, for agents driving it, such as through Puppeteer:
+
+  ```javascript
+  inspector.mcp = true;
+  const tools = inspector.getTools();
+  const { entities } = await inspector.executeTool('playcanvas_find_entities', { component: 'render' });
+  const entity = await inspector.executeTool('playcanvas_get', { id: entities[0].$id });
+  ```
+
 ## Engine versions
 
 Each inspector release names the engine versions it supports in its `playcanvas` peer dependency.
@@ -227,6 +276,11 @@ npm run build:types # writes the TypeScript declarations to types/
 npm run test:types  # compiles a TypeScript usage of the package against them
 npm run publint     # checks the package is publishable
 ```
+
+`npm run test:webmcp` calls the MCP tools through Chrome's own WebMCP: it launches system Chrome with
+WebMCP on, opens the inspector example of the engine's examples browser on port 5620, clicks **MCP**
+and runs a chain of calls. `node e2e/webmcp.mjs --url <page> --calls '<json>'` runs other calls on
+another page; see the top of `e2e/webmcp.mjs`.
 
 The tests run against the `playcanvas` version in `devDependencies`, on the engine's null graphics
 device under jsdom.
