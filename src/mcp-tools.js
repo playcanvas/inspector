@@ -1,10 +1,11 @@
-import { Material, revision, version } from 'playcanvas';
+import { Material, RenderTarget, Texture, revision, version } from 'playcanvas';
 
 import { assetRows } from './asset-view.js';
 import { cameraRows } from './camera-view.js';
 import { copyListRow, copySubject } from './copy-json.js';
 import { passRows } from './frame-graph-view.js';
 import { matchesFilter } from './hierarchy-view.js';
+import { LEVELS } from './log-capture.js';
 import { materialListRows, surveyMaterials } from './material-view.js';
 import { bufferOwners, memoryRows, videoMemory } from './memory-view.js';
 import { meshListRows, surveyMeshes } from './mesh-view.js';
@@ -23,6 +24,8 @@ import { textureRows } from './texture-view.js';
 /** @import { PerfCapture } from './perf-capture.js' */
 /** @import { PropertyRow, PropertySection } from './model.js' */
 /** @import { RefRegistry } from './ref-registry.js' */
+/** @import { LogCapture } from './log-capture.js' */
+/** @import { ImageCapture } from './image-capture.js' */
 
 /**
  * What the tools read the app through, provided by the inspector.
@@ -40,6 +43,22 @@ import { textureRows } from './texture-view.js';
  * than the app.
  * @property {() => FrameSnapshot} frame - The frame graph of the frame rendered last.
  * @property {McpPerfHost} perf - The capture of the Performance tab, and its controls.
+ * @property {LogCapture} logs - The messages the page logged since the tools were turned on.
+ * @property {() => ImageCapture} images - Captures textures and the canvas into images.
+ * @property {McpTimeHost} time - Pausing and stepping the app, as the Pause and Step buttons do.
+ */
+
+/**
+ * The Pause and Step buttons, as the time tools drive them.
+ *
+ * @typedef {object} McpTimeHost
+ * @ignore
+ * @property {() => boolean} paused - Whether the app is paused.
+ * @property {(paused: boolean) => void} setPaused - Pauses or resumes the app.
+ * @property {(frames: number, timeout: number) => Promise<number>} step - Pauses the app if it is
+ * not, then runs that many frames with time moving, and resolves with how many ran before the
+ * timeout, in milliseconds.
+ * @property {() => number} frame - The number of the app frame now.
  */
 
 /**
@@ -186,6 +205,7 @@ function validate(tool, args) {
         const ok = prop.type === 'integer' ? Number.isInteger(value) : typeof value === prop.type;
         if (!ok) throw new Error(`"${name}" must be ${prop.type === 'integer' ? 'an integer' : `a ${prop.type}`}`);
         if (prop.enum && !prop.enum.includes(value)) throw new Error(`"${name}" must be one of: ${prop.enum.join(', ')}`);
+        if (prop.pattern && !new RegExp(prop.pattern).test(value)) throw new Error(`"${name}" must match ${prop.pattern}`);
         if (prop.minimum !== undefined && value < prop.minimum) throw new Error(`"${name}" must be at least ${prop.minimum}`);
         if (prop.maximum !== undefined && value > prop.maximum) throw new Error(`"${name}" must be at most ${prop.maximum}`);
     }
@@ -809,6 +829,101 @@ function perfSeries(host, args) {
  *
  * @type {McpToolImpl[]}
  */
+/**
+ * @param {McpHost} host - The host.
+ * @param {any} args - Which messages.
+ * @returns {object} The messages logged since the tools were turned on, newest last.
+ */
+function logs(host, args) {
+    const capture = host.logs;
+    const level = args.level ?? 'log';
+    const allowed = new Set(LEVELS.slice(0, LEVELS.indexOf(level) + 1));
+    const filter = typeof args.filter === 'string' ? args.filter.toLowerCase() : '';
+    const since = args.since ?? 0;
+    const limit = clampInt(args.limit, 100, MAX_LIMIT);
+    const counts = Object.fromEntries(LEVELS.map(l => [l, 0]));
+    const matching = [];
+    for (const entry of capture.entries) {
+        // the counts cover the same messages as the entries, every level of them
+        if (entry.seq <= since) continue;
+        counts[entry.level] += entry.count;
+        if (!allowed.has(entry.level)) continue;
+        if (filter && !entry.text.toLowerCase().includes(filter)) continue;
+        matching.push(entry);
+    }
+    const oldest = capture.entries[0]?.seq ?? capture.seq + 1;
+    const out = {
+        capturing: capture.capturing,
+        // the newest of what matches, when there is more than the limit
+        entries: matching.slice(-limit),
+        total: matching.length,
+        truncated: matching.length > limit,
+        next: capture.seq,
+        counts
+    };
+    if (since && since < oldest - 1) out.dropped = `Messages after ${since} up to ${oldest - 1} were dropped: only the last 1000 are kept`;
+    return out;
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @param {any} args - What to capture.
+ * @returns {Promise<object>} The image, under $image, with what it shows.
+ */
+async function screenshot(host, args) {
+    const maxSize = args.maxSize ?? (args.id ? 512 : 1024);
+    if (!args.id) {
+        const image = await host.images().canvas({ maxSize });
+        const device = host.app.graphicsDevice;
+        return { $image: { mimeType: 'image/png', data: image.png }, width: image.width, height: image.height, source: { kind: 'canvas', width: device.width, height: device.height } };
+    }
+
+    const obj = host.refs.get(args.id);
+    if (!obj) throw new Error(`No object with id "${args.id}": it is unknown, or the app has let go of it`);
+    let texture = null;
+    let attachment;
+    if (obj instanceof Texture) {
+        texture = obj;
+    } else if (obj instanceof RenderTarget) {
+        attachment = args.attachment ?? (obj.colorBuffer ? 'color0' : 'depth');
+        texture = attachment === 'depth' ? obj.depthBuffer : obj.getColorBuffer(Number(attachment.slice(5)));
+        if (!texture) throw new Error(`The render target has no ${attachment} attachment${obj.depth && !obj.depthBuffer ? ' it can be read from: its depth is a renderbuffer, not a texture' : ''}`);
+    } else {
+        throw new Error(`A screenshot takes the id of a texture or a render target, or no id for the canvas, not a ${obj.constructor?.name ?? 'value'}`);
+    }
+
+    const channels = args.channels ?? 'rgb';
+    const image = await host.images().texture(texture, { maxSize, channels });
+    const source = { $id: args.id, $type: obj.constructor?.name, name: obj.name, width: texture.width, height: texture.height, format: texture.format };
+    if (attachment) source.attachment = attachment;
+    if (channels !== 'rgb') source.channels = channels;
+    return { $image: { mimeType: 'image/png', data: image.png }, width: image.width, height: image.height, source };
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @param {any} args - Whether to pause.
+ * @returns {object} Whether the app is paused, and its frame.
+ */
+function pause(host, args) {
+    host.time.setPaused(args.paused);
+    return { paused: host.time.paused(), frame: host.time.frame() };
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @param {any} args - How many frames.
+ * @returns {Promise<object>} How many frames ran, and the frame the app is paused on.
+ */
+async function step(host, args) {
+    const frames = args.frames ?? 1;
+    const from = host.time.frame();
+    const ran = await host.time.step(frames, (args.timeout ?? 10) * 1000);
+    const out = { paused: true, stepped: ran, frame: host.time.frame(), from };
+    if (ran < frames) out.note = `Only ${ran} of ${frames} frames ran before the timeout: frames stop while the page is hidden`;
+    return out;
+}
+
 const TOOLS = [{
     name: 'playcanvas_app_summary',
     description: 'Summarize the running PlayCanvas app: engine version, graphics device and its video memory, ' +
@@ -967,6 +1082,65 @@ const TOOLS = [{
     },
     annotations: { readOnlyHint: true },
     execute: perfSeries
+}, {
+    name: 'playcanvas_logs',
+    description: 'The messages the page logged to the console since the MCP tools were turned on, and the errors ' +
+        'nothing caught: the engine\'s warnings and errors (in a debug build), shader compile errors, failed loads and ' +
+        'the app\'s own messages. Newest last; a message repeated in a row is counted, not repeated. level is the least ' +
+        'severe level returned (error, warn, info, log, debug). Pass the next number returned as since to get only ' +
+        'what was logged after, such as around a step to reproduce; counts then cover only those messages too.',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            level: { type: 'string', enum: LEVELS, default: 'log', description: 'The least severe level returned.' },
+            filter: { type: 'string', description: 'Only messages containing this, case-insensitive.' },
+            since: { type: 'integer', minimum: 0, description: 'Only messages numbered after this.' },
+            limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: 100 }
+        }
+    },
+    annotations: { readOnlyHint: true },
+    execute: logs
+}, {
+    name: 'playcanvas_screenshot',
+    description: 'Capture an image. Without id, what the canvas shows. With the id of a texture or a render target ' +
+        '(from playcanvas_list or playcanvas_get), that texture, or an attachment of the target, as the inspector ' +
+        'previews it: encoded and HDR textures decoded, depth as grayscale, a single channel as grayscale. channels ' +
+        'shows stored channels instead, such as "aaa" for alpha. Returns a PNG image.',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            id: { type: 'string', description: 'A texture or render target id. Omit for the canvas.' },
+            attachment: { type: 'string', enum: ['color0', 'color1', 'color2', 'color3', 'color4', 'color5', 'color6', 'color7', 'depth'], description: 'The attachment of a render target. Defaults to color0, or depth for a depth-only target.' },
+            channels: { type: 'string', pattern: '^[rgba]{3}$', default: 'rgb', description: 'Three of r, g, b and a: stored channels to show. rgb decodes the texture.' },
+            maxSize: { type: 'integer', minimum: 16, maximum: 2048, description: 'The longest side of the image, at most. Defaults to 512 for a texture and 1024 for the canvas.' }
+        }
+    },
+    annotations: { readOnlyHint: true },
+    execute: screenshot
+}, {
+    name: 'playcanvas_pause',
+    description: 'Pause or resume the app, as the inspector\'s Pause button does: time stands still while it keeps ' +
+        'rendering, so what is on screen and in the lists holds still. Use playcanvas_step to move on frame by frame.',
+    inputSchema: {
+        type: 'object',
+        properties: { paused: { type: 'boolean' } },
+        required: ['paused']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    execute: pause
+}, {
+    name: 'playcanvas_step',
+    description: 'Run frames with time moving, then hold the app paused: pauses it first if it is not. Returns once ' +
+        'the frames have run, or after timeout seconds, as frames stop while the page is hidden.',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            frames: { type: 'integer', minimum: 1, maximum: 600, default: 1 },
+            timeout: { type: 'integer', minimum: 1, maximum: 120, default: 10 }
+        }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    execute: step
 }];
 
 export { TOOLS, endPerfSession, validate };

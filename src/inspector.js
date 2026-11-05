@@ -28,6 +28,8 @@ import { captureJson, frameJson, rangeJson, seriesRows, toCsv } from './perf-cop
 import { buildPerfModel, captureNorms, formatMs, isHitch } from './perf-view.js';
 import { AmmoDebugDraw, DEBUG_DRAW } from './physics-debug.js';
 import { bodyRows, drawCollisionShape, drawJoint, jointRows, physicsStats } from './physics-view.js';
+import { ImageCapture } from './image-capture.js';
+import { LogCapture } from './log-capture.js';
 import { PropertyView } from './property-view.js';
 import { RefRegistry } from './ref-registry.js';
 import { buildScriptModel, isScriptClass, scriptListRows, surveyScripts } from './script-view.js';
@@ -1171,8 +1173,29 @@ class Inspector {
             device: () => this._deviceInfo(),
             byAgent: false,
             session: null
+        },
+        logs: new LogCapture(() => this._app?.frame ?? 0),
+        images: () => {
+            this._images ??= new ImageCapture(this._app);
+            return this._images;
+        },
+        time: {
+            paused: () => this._paused,
+            setPaused: (paused) => {
+                this.paused = paused;
+            },
+            step: (frames, timeout) => this._stepFrames(frames, timeout),
+            frame: () => this._app.frame ?? 0
         }
     };
+
+    /**
+     * Captures images for the screenshot tool, made on first use.
+     *
+     * @type {ImageCapture|null}
+     * @private
+     */
+    _images = null;
 
     /**
      * The frame graph and the app's own objects, found once per tool call.
@@ -1308,6 +1331,9 @@ class Inspector {
         this._mcpAbort?.abort();
         this._mcpAbort = null;
         endPerfSession(this._mcpHost, 'inspector destroyed');
+        this._mcpHost.logs.stop();
+        this._images?.destroy();
+        this._images = null;
         this._perf.destroy();
         this._perfCharts.destroy();
         const profiler = app.graphicsDevice?.gpuProfiler;
@@ -1431,6 +1457,7 @@ class Inspector {
     _applyMcp() {
         if (this._mcp && !this._mcpAbort) {
             this._mcpAbort = new AbortController();
+            this._mcpHost.logs.start();
             const context = Inspector.webMcpSupported ? /** @type {any} */ (document).modelContext : null;
             if (context) {
                 const signal = this._mcpAbort.signal;
@@ -1440,6 +1467,11 @@ class Inspector {
                     const execute = async (args) => {
                         try {
                             const result = await this.executeTool(name, args);
+                            // an image goes to the agent as an image, with what it shows as text
+                            if (result?.$image) {
+                                const { $image, ...rest } = result;
+                                return { content: [{ type: 'image', data: $image.data, mimeType: $image.mimeType }, { type: 'text', text: JSON.stringify(rest) }] };
+                            }
                             return { content: [{ type: 'text', text: JSON.stringify(result) }] };
                         } catch (e) {
                             return { content: [{ type: 'text', text: `${e?.message ?? e}` }], isError: true };
@@ -1457,6 +1489,7 @@ class Inspector {
             this._mcpAbort = null;
             // a recording the tools were to stop stops with them
             endPerfSession(this._mcpHost, 'MCP turned off');
+            this._mcpHost.logs.stop();
         }
 
         if (this._mcpBtn) {
@@ -1466,7 +1499,7 @@ class Inspector {
                 'callable from the page through executeTool. This browser has no WebMCP, so agents in the browser do not see them';
             setTip(this._mcpBtn, this._mcp ?
                 `MCP on: tools for AI agents are ${how}. They stay on while the panel is hidden. Click to turn them off` :
-                'MCP: offer tools to AI agents, which read the hierarchy, the lists of the tabs and any object by id, and record on the Performance tab, and never change the app');
+                'MCP: offer tools to AI agents, which read the hierarchy, the lists of the tabs and any object by id, take screenshots of the canvas and of textures, read what the page logs, record on the Performance tab, and pause and step the app. Nothing else in the app is changed');
         }
     }
 
@@ -1604,6 +1637,35 @@ class Inspector {
         app.timeScale = this._savedTimeScale;
         app.once('frameend', () => {
             if (this._paused) app.timeScale = 0;
+        });
+    }
+
+    /**
+     * Pauses the app if it is not, then runs frames with time moving, as pressing Step that many
+     * times does, and holds it paused again.
+     *
+     * @param {number} frames - How many frames to run.
+     * @param {number} timeout - How long to wait for them, in milliseconds.
+     * @returns {Promise<number>} How many frames ran: fewer when the timeout came first.
+     * @private
+     */
+    _stepFrames(frames, timeout) {
+        this.paused = true;
+        const app = this._app;
+        app.timeScale = this._savedTimeScale;
+        return new Promise((resolve) => {
+            const pending = { ran: 0, timer: /** @type {any} */ (null) };
+            // called after each frame, and once by the timeout
+            const tick = (timedOut = false) => {
+                if (!timedOut && ++pending.ran < frames && this._paused) return;
+                app.off('frameend', tick);
+                clearTimeout(pending.timer);
+                if (this._paused) app.timeScale = 0;
+                this._refresh();
+                resolve(pending.ran);
+            };
+            pending.timer = setTimeout(() => tick(true), timeout);
+            app.on('frameend', tick);
         });
     }
 

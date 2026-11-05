@@ -242,6 +242,24 @@ The summary's CPU figures leave out the inspector's own time, and say how much i
 `includeInspector` counts it. A capture the user recorded is not discarded unless `clear` is true;
 `clear: false` adds to it.
 
+These show the app and what it logs, and hold it still:
+
+| Tool | What it does |
+| --- | --- |
+| `playcanvas_screenshot` | A PNG image: what the canvas shows, or with the id of a texture or a render target, that texture or an attachment of the target, as its preview shows it: sRGB, HDR and encoded textures decoded, depth and single channels as grayscale. `channels` shows stored channels instead, such as `aaa` for alpha |
+| `playcanvas_logs` | What the page logged to the console since MCP was turned on, and the errors nothing caught: the engine's warnings in a debug build, shader errors, the app's own messages. Repeats in a row are counted, and `since` returns only what is new |
+| `playcanvas_pause` | Pauses or resumes the app, as the Pause button does |
+| `playcanvas_step` | Runs a number of frames with time moving, then holds the app paused |
+
+A texture is captured by drawing it with the preview's shaders into an 8-bit target the size of the
+image, then reading that back, so it comes out the way the panel previews it. WebGL2 cannot capture a
+comparison depth texture, such as a shadow map, or a depth renderbuffer; WebGPU captures shadow maps.
+HDR values above 1 clip to white, as in the preview. Through WebMCP a screenshot is an image the agent
+sees; through `executeTool` it is base64 PNG data under `$image`.
+
+Messages are kept while MCP is on, the last 1000 of them. The console methods are wrapped meanwhile,
+so DevTools names the wrapper as where a message came from until MCP is turned off.
+
 Each tool describes itself with a description and a JSON schema of its arguments, which is all an
 agent needs to use it. While MCP is on, the tools are offered two ways:
 
@@ -311,6 +329,9 @@ rather than read: `index.json`, then a file per kind (`entities.json`, `material
 `shaders.json` with their sources, `meshInstances.json` and so on) holding every object as
 `playcanvas_get` returns it, keyed by its `$id`, so the links between objects resolve across the
 files. A `README.md` in the directory describes them.
+
+The driver writes every screenshot it gets to a PNG file in `--images <dir>` (default
+`screenshots`), so `--calls` can capture textures and render targets to look at.
 
 `node e2e/webmcp.mjs --perf <frames> [dir]` records that many frames through the perf tools, with GPU
 and script timing where the app has them, prints the summary and writes `capture.json` (every frame,

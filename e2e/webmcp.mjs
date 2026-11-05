@@ -34,6 +34,7 @@
 //            Chrome started with --remote-debugging-port=9222 --enable-features=WebMCP). Uses its
 //            tab whose URL contains --url's value when given, else the first tab with an inspector,
 //            and leaves Chrome running.
+// --images   The directory screenshots are written to, as PNG files. Defaults to screenshots.
 // --headless Run Chrome without a window.
 //
 // Needs Chrome 150+ (WebMCP behind --enable-features=WebMCP). Set CHROME_PATH to use another build.
@@ -65,6 +66,7 @@ const perfDumpIndex = args.indexOf('--perf-dump');
 const perfDumpNext = perfDumpIndex >= 0 ? args[perfDumpIndex + 1] : undefined;
 const perfDumpDir = perfDumpIndex < 0 ? undefined : perfDumpNext && !perfDumpNext.startsWith('--') ? perfDumpNext : dumpDir ?? 'perf-dump';
 const wait = args.includes('--wait');
+const imagesDir = option('--images') ?? 'screenshots';
 const connectUrl = option('--connect');
 const executablePath = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
@@ -200,11 +202,16 @@ async function callTool(page, name, input) {
     const ms = Date.now() - started;
     if (reply.error) return { error: reply.error, ms };
 
-    // WebMCP hands back what execute returned: an MCP result with the JSON as text
+    // WebMCP hands back what execute returned: an MCP result with the JSON as text, and for a
+    // screenshot an image before it
     const raw = typeof reply.ok === 'string' ? JSON.parse(reply.ok) : reply.ok;
-    const text = raw?.content?.[0]?.text;
+    const content = raw?.content ?? [];
+    const text = content.find(item => item.type === 'text')?.text;
     if (raw?.isError) return { error: text, ms };
-    return { result: typeof text === 'string' ? JSON.parse(text) : raw, text: text ?? '', ms };
+    const result = typeof text === 'string' ? JSON.parse(text) : raw;
+    const image = content.find(item => item.type === 'image');
+    if (image) result.$image = { mimeType: image.mimeType, data: image.data };
+    return { result, text: text ?? '', ms };
 }
 
 /**
@@ -481,6 +488,15 @@ try {
             failed = true;
             console.log(`\n#${index} ${name} ${JSON.stringify(input)} failed in ${reply.ms} ms: ${reply.error}`);
             return;
+        }
+        // an image is written to a file, and named rather than printed
+        const image = reply.result.$image;
+        if (image) {
+            mkdirSync(imagesDir, { recursive: true });
+            const label = (reply.result.source?.name ?? reply.result.source?.kind ?? 'image').replace(/[^\w.-]+/g, '_');
+            const file = join(imagesDir, `${String(index).padStart(2, '0')}-${label}${reply.result.source?.attachment ? `-${reply.result.source.attachment}` : ''}.png`);
+            writeFileSync(file, Buffer.from(image.data, 'base64'));
+            reply.result.$image = `${file} (${(image.data.length * 0.75 / 1024).toFixed(1)} KB)`;
         }
         console.log(`\n#${index} ${name} ${JSON.stringify(input)} (${reply.ms} ms, ${reply.text.length} chars)\n${print(reply.result)}`);
     });
