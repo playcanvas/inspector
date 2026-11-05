@@ -364,4 +364,4 @@ function rangeJson(capture, from, to) {
     return out;
 }
 
-export { SERIES, captureJson, frameJson, rangeJson, seriesRows, toCsv };
+export { SERIES, captureJson, frameJson, header, loadJson, passesOf, rangeJson, seriesRows, toCsv };

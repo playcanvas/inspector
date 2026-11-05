@@ -8,6 +8,8 @@ import { matchesFilter } from './hierarchy-view.js';
 import { materialListRows, surveyMaterials } from './material-view.js';
 import { bufferOwners, memoryRows, videoMemory } from './memory-view.js';
 import { meshListRows, surveyMeshes } from './mesh-view.js';
+import { SERIES, frameJson, header, loadJson, passesOf, seriesRows, toCsv } from './perf-copy.js';
+import { captureNorms, isHitch, rangeStats } from './perf-view.js';
 import { renderTargetRows } from './render-target-view.js';
 import { scriptListRows, surveyScripts } from './script-view.js';
 import { shaderRows } from './shader-view.js';
@@ -18,6 +20,7 @@ import { textureRows } from './texture-view.js';
 /** @import { CopyOptions } from './copy-json.js' */
 /** @import { FrameSnapshot } from './frame-graph-view.js' */
 /** @import { ListRow } from './list-view.js' */
+/** @import { PerfCapture } from './perf-capture.js' */
 /** @import { PropertyRow, PropertySection } from './model.js' */
 /** @import { RefRegistry } from './ref-registry.js' */
 
@@ -36,6 +39,43 @@ import { textureRows } from './texture-view.js';
  * @property {(obj: object) => boolean} exclude - Whether a node belongs to the inspector rather
  * than the app.
  * @property {() => FrameSnapshot} frame - The frame graph of the frame rendered last.
+ * @property {McpPerfHost} perf - The capture of the Performance tab, and its controls.
+ */
+
+/**
+ * The Performance tab as the perf tools drive it: its capture, and the switches the panel shows,
+ * set through the panel so its controls follow.
+ *
+ * @typedef {object} McpPerfHost
+ * @ignore
+ * @property {PerfCapture} capture - The capture.
+ * @property {(on: boolean) => void} setRecording - Starts or stops recording, as the Record button.
+ * @property {(on: boolean) => void} setGpuTimings - Turns the GPU timings on or off.
+ * @property {(on: boolean) => void} setScriptTiming - Turns the timing of scripts on or off.
+ * @property {() => void} clear - Forgets every frame, as the Clear button.
+ * @property {() => boolean} gpuSupported - Whether the device can time the GPU.
+ * @property {() => boolean} gpuTimings - Whether the GPU is being timed.
+ * @property {() => boolean} paused - Whether the inspector has paused the app.
+ * @property {() => object} device - What to say about the device in a capture.
+ * @property {boolean} byAgent - Whether the frames kept were recorded by the tools, rather than by
+ * the user, whose capture the tools do not clear unasked. Starting to record from the panel or
+ * from code clears it.
+ * @property {PerfSession|null} session - The recording the tools are stopping after a number of
+ * frames, if any.
+ */
+
+/**
+ * A recording the perf tools stop after a number of frames.
+ *
+ * @typedef {object} PerfSession
+ * @ignore
+ * @property {number} from - The first frame it records.
+ * @property {number} target - The frame it stops before.
+ * @property {boolean} hidden - Whether the page was hidden while it recorded.
+ * @property {() => void} onFrame - Stops it once the frames are recorded.
+ * @property {() => void} onVisibility - Notes the page being hidden.
+ * @property {ReturnType<typeof setTimeout>} timer - Stops it when it takes too long.
+ * @property {((reason: string) => void)|null} done - Hands the reason it ended to a caller waiting.
  */
 
 /**
@@ -45,8 +85,8 @@ import { textureRows } from './texture-view.js';
  * @property {string} name - The name the tool is called by.
  * @property {string} description - What the tool does, for the agent choosing it.
  * @property {object} inputSchema - The JSON schema of its arguments.
- * @property {{ readOnlyHint: boolean }} annotations - Hints about its effects: every tool of the
- * inspector only reads.
+ * @property {{ readOnlyHint: boolean, destructiveHint?: boolean }} annotations - Hints about its
+ * effects: most tools only read; the perf tools change the inspector's capture, never the app.
  */
 
 /**
@@ -363,8 +403,409 @@ function get(host, args) {
     return json;
 }
 
+// the series playcanvas_perf_series returns, and the most rows of one at once
+const PERF_SERIES = [...Object.keys(SERIES), 'scripts', 'counters', 'loading', 'events'];
+const MAX_SERIES_ROWS = 300;
+
+// how many of each kind of entry a summary lists, so it stays a few KB
+const SUMMARY_PASSES = 15;
+const SUMMARY_SCRIPTS = 10;
+const SUMMARY_HITCHES = 10;
+const SUMMARY_LOADS = 10;
+
+// how long a recording of a number of frames may take by default, and at most, in seconds
+const PERF_TIMEOUT = 30;
+const MAX_PERF_TIMEOUT = 300;
+
 /**
- * The tools of the inspector. Every one of them only reads the app.
+ * @param {number} v - A figure.
+ * @returns {number} It to three decimals, which is a microsecond for a time in milliseconds.
+ */
+function round(v) {
+    return Math.round(v * 1000) / 1000;
+}
+
+/**
+ * @returns {string} Whether the page is visible, hidden or else, as the browser says; frames stop
+ * while it is hidden.
+ */
+function visibility() {
+    return typeof document !== 'undefined' ? document.visibilityState : 'unknown';
+}
+
+/**
+ * @param {PerfCapture} capture - The capture.
+ * @param {number} frame - A frame number, as the frames are numbered in what the tools return.
+ * @returns {number} Its sequence number.
+ */
+function seqOf(capture, frame) {
+    return capture.startedAtStartup ? frame : frame - 1;
+}
+
+/**
+ * @param {PerfCapture} capture - The capture.
+ * @param {any} args - The first and last frame numbers asked for, both optional.
+ * @returns {{ from: number, to: number }} The frames, as sequence numbers, within those kept.
+ */
+function rangeOf(capture, args) {
+    if (!capture.count) throw new Error('Nothing is recorded: start a capture with playcanvas_perf_record');
+    const first = capture.first;
+    const last = capture.end - 1;
+    const from = args?.from === undefined ? first : Math.max(first, seqOf(capture, args.from));
+    const to = args?.to === undefined ? last : Math.min(last, seqOf(capture, args.to));
+    if (from > to) throw new Error(`No frames kept in that range. Frames kept: ${capture.frameNumber(first)} to ${capture.frameNumber(last)}`);
+    return { from, to };
+}
+
+/**
+ * @param {PerfCapture} capture - The capture.
+ * @param {string|Float64Array} key - The channel, or a ring of values like one.
+ * @param {number} from - The first frame.
+ * @param {number} to - The last frame, inclusive.
+ * @returns {object|null} The smallest, mean, 95th percentile and largest of the figure over the
+ * frames, with how many frames had it where some did not, or null where none did.
+ */
+function figureStats(capture, key, from, to) {
+    const { count, avg, p95, max } = rangeStats(capture, key, from, to);
+    if (!count) return null;
+    const data = typeof key === 'string' ? capture.data[key] : key;
+    let min = Infinity;
+    for (let seq = from; seq <= to; seq++) {
+        const v = data[capture.slot(seq)];
+        if (v < min) min = v;
+    }
+    /** @type {any} */
+    const out = { min: round(min), avg: round(avg), p95: round(p95), max: round(max) };
+    if (count < to - from + 1) out.frames = count;
+    return out;
+}
+
+/**
+ * @param {PerfCapture} capture - The capture.
+ * @param {number} from - The first frame.
+ * @param {number} to - The last frame, inclusive.
+ * @param {(seq: number) => number} value - The figure of a frame.
+ * @returns {Float64Array} A ring of the figure, like the channels of the capture, for
+ * {@link figureStats}.
+ */
+function ringOf(capture, from, to, value) {
+    const ring = new Float64Array(capture.slots).fill(NaN);
+    for (let seq = from; seq <= to; seq++) ring[capture.slot(seq)] = value(seq);
+    return ring;
+}
+
+/**
+ * @param {Record<string, object|null>} figures - Figures by name.
+ * @returns {Record<string, object>} Those that some frame had.
+ */
+function present(figures) {
+    return Object.fromEntries(Object.entries(figures).filter(([, v]) => v));
+}
+
+/**
+ * The capture, or a span of it, in a few KB: for each series the smallest, mean, 95th percentile
+ * and largest figure, the GPU passes and script types that took longest, the hitches, what loaded
+ * and the shader compiles. Durations are in milliseconds, memory in bytes.
+ *
+ * @param {McpHost} host - The host.
+ * @param {number} from - The first frame.
+ * @param {number} to - The last frame, inclusive.
+ * @param {boolean} [withInspector] - Whether to count the inspector's own time in the CPU figures.
+ * @returns {object} The summary.
+ */
+function perfSummary(host, from, to, withInspector = false) {
+    const perf = host.perf;
+    const capture = perf.capture;
+    const d = capture.data;
+    const stats = key => figureStats(capture, key, from, to);
+
+    const head = header(capture, from, to);
+    const interval = rangeStats(capture, 'interval', from, to);
+    /** @type {any} */
+    const out = {
+        ...head,
+        medianFrame: round(head.medianFrame),
+        displayInterval: round(head.displayInterval),
+        fps: interval.count ? round(1000 / interval.avg) : null,
+        device: perf.device(),
+        recording: capture.recording,
+        options: { gpuTimings: perf.gpuTimings(), scriptTiming: capture.timeScripts },
+        visibility: visibility()
+    };
+    if (perf.session?.hidden) out.hiddenWhileRecording = true;
+    if (perf.paused()) out.paused = true;
+
+    const inspector = rangeStats(capture, 'inspector', from, to);
+    out.inspectorTime = withInspector ?
+        'included in the CPU figures' :
+        `left out of the CPU figures: ${round(inspector.count ? inspector.avg : 0)} ms a frame on average; pass includeInspector to count it`;
+
+    const update = withInspector ? 'update' : ringOf(capture, from, to, seq => d.update[capture.slot(seq)] - d.inspector[capture.slot(seq)]);
+    out.frameTime = stats('interval');
+    out.cpu = present({
+        total: stats(withInspector ? 'cpu' : 'cpuApp'),
+        update: stats(update),
+        render: stats('render'),
+        scripts: stats('scripts'),
+        physics: stats('physics'),
+        animation: stats('anim'),
+        ...(withInspector ? { inspector: stats('inspector') } : {})
+    });
+
+    // the GPU passes by name, those that took longest on average first
+    const gpu = stats('gpu');
+    if (gpu) {
+        const names = new Set();
+        for (let seq = from; seq <= to; seq++) {
+            for (const pass of capture.passesInOrder(seq)) names.add(pass.name);
+        }
+        const passes = [...names].map((name) => {
+            const ring = ringOf(capture, from, to, seq => (Number.isFinite(d.gpu[capture.slot(seq)]) ? passesOf(capture, seq)[name] ?? 0 : NaN));
+            return { name, ...figureStats(capture, ring, from, to) };
+        }).sort((a, b) => b.avg - a.avg);
+        out.gpu = { frame: gpu, passes: passes.slice(0, SUMMARY_PASSES) };
+        if (passes.length > SUMMARY_PASSES) out.gpu.morePasses = passes.length - SUMMARY_PASSES;
+    }
+
+    // the script types that took longest on average, over the frames scripts were timed in
+    const scripts = stats('scriptsTotal');
+    if (scripts) {
+        const types = capture.scriptNames.map((name, id) => ({ name, ...figureStats(capture, ringOf(capture, from, to, seq => capture.scriptTime(seq, id)), from, to) }))
+        .filter(type => type.avg > 0)
+        .sort((a, b) => b.avg - a.avg);
+        out.scripts = { total: scripts, calls: stats('scriptCalls'), timingCost: stats('scriptCost'), top: types.slice(0, SUMMARY_SCRIPTS) };
+        if (types.length > SUMMARY_SCRIPTS) out.scripts.moreTypes = types.length - SUMMARY_SCRIPTS;
+    }
+
+    out.draws = present({
+        total: stats('draws'),
+        forward: stats('drawsForward'),
+        shadow: stats('drawsShadow'),
+        primitives: stats('primitives'),
+        computeDispatches: stats('dispatches')
+    });
+    out.memory = present({ jsHeap: stats('heap'), video: stats('vram'), textures: stats('vramTex') });
+
+    // the frames that took far longer than the median one, the longest first
+    const { median } = captureNorms(capture);
+    const hitches = [];
+    let compiles = 0;
+    let compileTime = 0;
+    const loads = [];
+    for (let seq = from; seq <= to; seq++) {
+        const s = capture.slot(seq);
+        if (isHitch(capture, seq, median)) {
+            /** @type {any} */
+            const hitch = { frame: capture.frameNumber(seq), interval: round(d.interval[s]), cpu: round(d[withInspector ? 'cpu' : 'cpuApp'][s]) };
+            if (Number.isFinite(d.gpu[s])) hitch.gpu = round(d.gpu[s]);
+            if (d.compiles[s] > 0) hitch.shaderCompiles = d.compiles[s];
+            if (capture.loads(seq).length) hitch.loads = capture.loads(seq).length;
+            hitches.push(hitch);
+        }
+        if (d.compiles[s] > 0) {
+            compiles += d.compiles[s];
+            compileTime += d.compileTime[s];
+        }
+        for (const load of capture.loads(seq)) loads.push({ frame: capture.frameNumber(seq), ...loadJson(load, d.tick[s]) });
+    }
+    hitches.sort((a, b) => b.interval - a.interval);
+    out.hitches = { count: hitches.length, longest: hitches.slice(0, SUMMARY_HITCHES) };
+    if (compiles) out.shaderCompiles = { count: compiles, time: round(compileTime) };
+    if (loads.length) {
+        const timed = loads.filter(load => load.kind !== 'milestone').sort((a, b) => (b.duration ?? 0) - (a.duration ?? 0));
+        const bytes = timed.reduce((sum, load) => sum + (load.bytes ?? 0), 0);
+        out.loads = {
+            count: timed.length,
+            bytes,
+            failed: timed.filter(load => load.failed).length,
+            longest: timed.slice(0, SUMMARY_LOADS).map(({ frame, kind, name, type, duration, bytes, failed }) => ({
+                frame, kind, name, ...(type ? { type } : {}), ...(Number.isFinite(duration) ? { duration: round(duration) } : {}), ...(bytes ? { bytes } : {}), ...(failed ? { failed } : {})
+            }))
+        };
+    }
+    return out;
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @returns {object} Whether the inspector is recording, what it keeps, its options and whether the
+ * page is visible.
+ */
+function perfStatus(host) {
+    const perf = host.perf;
+    const capture = perf.capture;
+    /** @type {any} */
+    const out = {
+        recording: capture.recording,
+        frames: capture.count,
+        capacity: capture.capacity,
+        recordedBy: capture.count || capture.recording ? (perf.byAgent ? 'agent' : 'user') : null
+    };
+    if (capture.count) out.range = { from: capture.frameNumber(capture.first), to: capture.frameNumber(capture.end - 1) };
+    const session = perf.session;
+    if (session) out.framesLeft = Math.max(0, session.target - capture.end);
+    out.options = {
+        gpuTimings: perf.gpuTimings(),
+        gpuTimingsSupported: perf.gpuSupported(),
+        scriptTiming: capture.timeScripts,
+        scriptTimingSupported: capture.supports.scripts,
+        engineBuild: capture.detailed ? 'profiler or debug' : 'release'
+    };
+    out.visibility = visibility();
+    if (session?.hidden) out.hiddenWhileRecording = true;
+    if (perf.paused()) out.paused = true;
+    return out;
+}
+
+/**
+ * Ends the recording the tools stop after a number of frames, telling a caller waiting for it why.
+ * Stops recording too, unless only letting go of it.
+ *
+ * @param {McpHost} host - The host.
+ * @param {string} reason - Why it ended.
+ * @param {boolean} [stop] - Whether to stop recording.
+ */
+function endPerfSession(host, reason, stop = true) {
+    const perf = host.perf;
+    const session = perf.session;
+    if (!session) return;
+    perf.session = null;
+    host.app.off('frameupdate', session.onFrame);
+    clearTimeout(session.timer);
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', session.onVisibility);
+    if (stop && perf.capture.recording) perf.setRecording(false);
+    session.done?.(reason);
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @param {any} args - How many frames to record, the options, whether to clear what is kept, and
+ * whether to wait.
+ * @returns {Promise<object>|object} Once the frames are recorded, how recording ended and the
+ * summary of the frames recorded; or, without waiting, the status.
+ */
+function perfRecord(host, args) {
+    const perf = host.perf;
+    const capture = perf.capture;
+    const userFrames = !perf.byAgent && (capture.count > 0 || capture.recording);
+    if (userFrames && args.clear === undefined) {
+        throw new Error(`The user ${capture.recording ? 'is recording' : `recorded the ${capture.count} frames kept`}. ` +
+            'Pass clear: true to discard them and record afresh, or clear: false to add to them');
+    }
+    if (args.gpuTimings && !perf.gpuSupported()) throw new Error('This device cannot time the GPU');
+    if (args.scriptTiming && !capture.supports.scripts) throw new Error('This app has no script system to time');
+
+    endPerfSession(host, 'restarted', false);
+    if (args.clear ?? true) {
+        if (capture.recording) perf.setRecording(false);
+        perf.clear();
+    }
+    if (args.gpuTimings !== undefined) perf.setGpuTimings(args.gpuTimings);
+    if (args.scriptTiming !== undefined) perf.setScriptTiming(args.scriptTiming);
+    if (!capture.recording) perf.setRecording(true);
+    perf.byAgent = true;
+
+    if (!args.frames) return { ...perfStatus(host), note: 'Recording until playcanvas_perf_stop, keeping the last frames up to the capacity' };
+
+    const from = capture.end;
+    /** @type {PerfSession} */
+    const session = {
+        from,
+        target: from + args.frames,
+        hidden: visibility() === 'hidden',
+        onFrame: () => {
+            // the capture completes a frame as the next begins, so it has it by now
+            if (!capture.recording) endPerfSession(host, 'stopped from the panel', false);
+            else if (capture.end >= session.target) endPerfSession(host, 'recorded');
+        },
+        onVisibility: () => {
+            if (visibility() === 'hidden') session.hidden = true;
+        },
+        timer: setTimeout(() => endPerfSession(host, 'timed out'), (args.timeout ?? PERF_TIMEOUT) * 1000),
+        done: null
+    };
+    perf.session = session;
+    host.app.on('frameupdate', session.onFrame);
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', session.onVisibility);
+
+    if (args.wait === false) return { ...perfStatus(host), note: `Recording ${args.frames} frames, then stopping` };
+    return new Promise((resolve) => {
+        session.done = (reason) => {
+            const recorded = capture.end - Math.max(from, capture.first);
+            /** @type {any} */
+            const out = { ended: reason, frames: recorded };
+            if (reason === 'timed out') {
+                out.note = `Only ${recorded} of ${args.frames} frames were recorded in ${args.timeout ?? PERF_TIMEOUT} s: ` +
+                    'frames stop while the page is hidden, and slow down while the app is paused or busy';
+            }
+            if (recorded > 0) out.summary = perfSummary(host, Math.max(from, capture.first), capture.end - 1);
+            else out.status = perfStatus(host);
+            resolve(out);
+        };
+    });
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @returns {object} The summary of every frame kept, once recording is stopped.
+ */
+function perfStop(host) {
+    const perf = host.perf;
+    endPerfSession(host, 'stopped');
+    if (perf.capture.recording) perf.setRecording(false);
+    if (!perf.capture.count) return perfStatus(host);
+    return perfSummary(host, perf.capture.first, perf.capture.end - 1);
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @param {any} args - The frames, and whether to count the inspector's time.
+ * @returns {object} The summary.
+ */
+function perfSummaryTool(host, args) {
+    const { from, to } = rangeOf(host.perf.capture, args);
+    return perfSummary(host, from, to, args.includeInspector === true);
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @param {any} args - The frame number.
+ * @returns {object} Everything recorded for the frame.
+ */
+function perfFrame(host, args) {
+    const capture = host.perf.capture;
+    const seq = seqOf(capture, args.frame);
+    if (!capture.has(seq)) {
+        throw new Error(capture.count ?
+            `Frame ${args.frame} is not kept. Frames kept: ${capture.frameNumber(capture.first)} to ${capture.frameNumber(capture.end - 1)}` :
+            'Nothing is recorded: start a capture with playcanvas_perf_record');
+    }
+    return frameJson(capture, seq);
+}
+
+/**
+ * @param {McpHost} host - The host.
+ * @param {any} args - The series, the frames and the format.
+ * @returns {object|string} The rows of the series, as JSON or CSV.
+ */
+function perfSeries(host, args) {
+    const capture = host.perf.capture;
+    const range = rangeOf(capture, args);
+    // a series with a row per frame stops after the most rows; the others, which skip frames, are
+    // bounded by the frames kept
+    const to = PERF_SERIES.indexOf(args.key) < Object.keys(SERIES).length ? Math.min(range.to, range.from + MAX_SERIES_ROWS - 1) : range.to;
+    const rows = seriesRows(capture, args.key, range.from, to);
+    /** @type {any} */
+    const out = { series: args.key, range: { from: capture.frameNumber(range.from), to: capture.frameNumber(to) } };
+    if (to < range.to) out.next = capture.frameNumber(to + 1);
+    if (args.format === 'csv') out.csv = toCsv(rows);
+    else out.rows = rows;
+    return out;
+}
+
+/**
+ * The tools of the inspector. None of them changes the app: most only read it, and the perf tools
+ * drive the inspector's own capture.
  *
  * @type {McpToolImpl[]}
  */
@@ -437,6 +878,95 @@ const TOOLS = [{
     },
     annotations: { readOnlyHint: true },
     execute: get
+}, {
+    name: 'playcanvas_perf_record',
+    description: 'Start recording frames on the inspector\'s Performance tab: CPU update and render times, GPU time ' +
+        'per pass, script times, draw calls, memory, hitches and loads, a frame each, keeping the last 1000. ' +
+        'With frames, it stops by itself after that many and, unless wait is false, returns the summary of ' +
+        'those frames; it gives up after timeout seconds, as frames stop while the page is hidden. Without ' +
+        'frames, it records until playcanvas_perf_stop. gpuTimings and scriptTiming turn those timings on or ' +
+        'off; script timing costs about half a microsecond a script call, counted as the inspector\'s time. A ' +
+        'capture the user recorded is not discarded unless clear is true; clear: false adds to what is kept. ' +
+        'Changes the inspector\'s capture and switches, never the app.',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            frames: { type: 'integer', minimum: 1, maximum: 1000, description: 'Stop after this many frames.' },
+            gpuTimings: { type: 'boolean', description: 'Time the GPU passes, where the device can.' },
+            scriptTiming: { type: 'boolean', description: 'Time each script type.' },
+            clear: { type: 'boolean', description: 'Discard the frames kept first. Defaults to true, but a capture the user recorded is only discarded when this is given.' },
+            wait: { type: 'boolean', default: true, description: 'With frames, wait for them and return their summary.' },
+            timeout: { type: 'integer', minimum: 1, maximum: MAX_PERF_TIMEOUT, default: PERF_TIMEOUT, description: 'With frames, the seconds to wait for them before stopping.' }
+        }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    execute: perfRecord
+}, {
+    name: 'playcanvas_perf_stop',
+    description: 'Stop recording frames on the Performance tab, keeping them, and return the summary of every ' +
+        'frame kept, as playcanvas_perf_summary does.',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    execute: perfStop
+}, {
+    name: 'playcanvas_perf_status',
+    description: 'Whether the Performance tab is recording, how many frames it keeps and which, who recorded ' +
+        'them, how many frames a recording of playcanvas_perf_record has left, the timings on, and whether ' +
+        'the page is visible, as frames stop while it is hidden.',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true },
+    execute: perfStatus
+}, {
+    name: 'playcanvas_perf_summary',
+    description: 'Summarize the frames recorded, in a few KB: for frame time, CPU update and render, scripts, ' +
+        'GPU time, draw calls and memory the min, average, 95th percentile and max, the GPU passes and script ' +
+        'types that took longest, the hitches (frames over twice the median), what loaded and the shader ' +
+        'compiles. Times are in ms, memory in bytes. The CPU figures leave out the inspector\'s own time ' +
+        'unless includeInspector is true. from and to pick frames by number; then use playcanvas_perf_frame ' +
+        'for one frame in full and playcanvas_perf_series for a figure frame by frame.',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            from: { type: 'integer', minimum: 0, description: 'The first frame, by number. Defaults to the first kept.' },
+            to: { type: 'integer', minimum: 0, description: 'The last frame, by number. Defaults to the last kept.' },
+            includeInspector: { type: 'boolean', default: false, description: 'Count the inspector\'s own time in the CPU figures.' }
+        }
+    },
+    annotations: { readOnlyHint: true },
+    execute: perfSummaryTool
+}, {
+    name: 'playcanvas_perf_frame',
+    description: 'Everything recorded for one frame, by number: CPU phases, GPU passes in the order they ran ' +
+        'with the effect running each, script types, draw calls, memory, resources, shader compiles, events, ' +
+        'counters and loads. Times are in ms, memory in bytes.',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            frame: { type: 'integer', minimum: 0, description: 'The frame number, as the summary and series name frames.' }
+        },
+        required: ['frame']
+    },
+    annotations: { readOnlyHint: true },
+    execute: perfFrame
+}, {
+    name: 'playcanvas_perf_series',
+    description: 'One figure frame by frame, a row per frame: frame (the frame interval), cpu (its phases), gpu ' +
+        '(a column per pass), draws, memory or resources; or scripts (a column per script type, frames timed ' +
+        'only), counters (app.stats.user), loading (a row per load) or events (frames with any). A series with ' +
+        `a row per frame returns up to ${MAX_SERIES_ROWS} rows; next is the frame to continue from. format csv ` +
+        'returns the rows as CSV text, which is smaller.',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            key: { type: 'string', enum: PERF_SERIES },
+            from: { type: 'integer', minimum: 0, description: 'The first frame, by number. Defaults to the first kept.' },
+            to: { type: 'integer', minimum: 0, description: 'The last frame, by number. Defaults to the last kept.' },
+            format: { type: 'string', enum: ['json', 'csv'], default: 'json' }
+        },
+        required: ['key']
+    },
+    annotations: { readOnlyHint: true },
+    execute: perfSeries
 }];
 
-export { TOOLS, validate };
+export { TOOLS, endPerfSession, validate };

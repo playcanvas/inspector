@@ -97,12 +97,18 @@ describe('Inspector MCP tools', function () {
         expect(error?.message).to.match(/off/);
     });
 
-    it('describes read-only tools while on', function () {
+    it('describes the tools while on: only the recording ones change anything, and never the app', function () {
         inspector = new Inspector(app, { storageKey: null, mcp: true });
         const tools = inspector.getTools();
-        expect(tools.map(t => t.name)).to.deep.equal(['playcanvas_app_summary', 'playcanvas_index', 'playcanvas_find_entities', 'playcanvas_list', 'playcanvas_get']);
+        expect(tools.map(t => t.name)).to.deep.equal([
+            'playcanvas_app_summary', 'playcanvas_index', 'playcanvas_find_entities', 'playcanvas_list', 'playcanvas_get',
+            'playcanvas_perf_record', 'playcanvas_perf_stop', 'playcanvas_perf_status', 'playcanvas_perf_summary',
+            'playcanvas_perf_frame', 'playcanvas_perf_series'
+        ]);
         for (const tool of tools) {
-            expect(tool.annotations.readOnlyHint).to.be.true;
+            const changes = tool.name === 'playcanvas_perf_record' || tool.name === 'playcanvas_perf_stop';
+            expect(tool.annotations.readOnlyHint).to.equal(!changes);
+            if (changes) expect(tool.annotations.destructiveHint).to.be.false;
             expect(tool.inputSchema.type).to.equal('object');
             expect(tool).to.not.have.property('execute');
         }
@@ -267,7 +273,7 @@ describe('Inspector MCP tools', function () {
         await new Promise((resolve) => {
             setTimeout(resolve, 0);
         });
-        expect(registered.map(r => r.tool.name)).to.have.lengthOf(5);
+        expect(registered.map(r => r.tool.name)).to.have.lengthOf(11);
         expect(registered[0].tool.annotations.readOnlyHint).to.be.true;
 
         inspector.visible = false;
@@ -284,6 +290,242 @@ describe('Inspector MCP tools', function () {
 
         inspector.mcp = false;
         expect(registered.every(r => r.signal.aborted)).to.be.true;
+    });
+
+    describe('performance capture', function () {
+        const realNow = performance.now;
+        let time;
+
+        /**
+         * Runs one frame of the app the way the engine's tick does, on a clock the capture reads,
+         * so frame times are exact. The capture completes a frame as the next begins.
+         *
+         * @param {object} [frame] - The frame.
+         * @param {number} [frame.update] - Its update time, the inspector's included.
+         * @param {number} [frame.render] - Its render time.
+         * @param {number} [frame.gap] - The time from the end of its work to the next frame.
+         * @param {number} [frame.inspector] - The inspector's own time in its update.
+         */
+        const tick = ({ update = 4, render = 3, gap = 9, inspector: own = 1 } = {}) => {
+            const f = app.stats.frame;
+            app.fire('frameupdate');
+            app.frame++;
+            Object.assign(f, {
+                updateStart: time,
+                updateTime: update,
+                scriptUpdateStart: time,
+                scriptUpdate: update / 2,
+                animUpdateStart: time,
+                animUpdate: 0,
+                scriptPostUpdateStart: time,
+                scriptPostUpdate: 0,
+                physicsStart: 0,
+                physicsTime: 0
+            });
+            inspector._perf.addOverhead(time, own);
+            time += update;
+            app.graphicsDevice.renderVersion++;
+            f.renderStart = time;
+            f.renderTime = render;
+            time += render;
+            app.fire('frameend');
+            time += gap;
+        };
+
+        /**
+         * @param {number} n - How many frames to run.
+         * @param {object} [frame] - Each frame, as {@link tick} takes it.
+         */
+        const run = (n, frame) => {
+            for (let i = 0; i < n; i++) tick(frame);
+        };
+
+        beforeEach(function () {
+            time = 1000;
+            performance.now = () => time;
+            // an app past its first frame, so a capture begins with frames rather than its start
+            app.frame = 1;
+            inspector = /** @type {any} */ (new Inspector(app, { storageKey: null, mcp: true }));
+        });
+
+        afterEach(function () {
+            performance.now = realNow;
+        });
+
+        it('records a number of frames, stops by itself and returns their summary', async function () {
+            const pending = inspector.executeTool('playcanvas_perf_record', { frames: 4 });
+            expect(inspector.recording).to.be.true;
+            const status = await inspector.executeTool('playcanvas_perf_status');
+            expect(status).to.include({ recording: true, frames: 0, framesLeft: 4, recordedBy: 'agent' });
+            expect(status.visibility).to.be.a('string');
+
+            // the fourth frame is complete once the fifth begins
+            run(5);
+            const result = await pending;
+            expect(result.ended).to.equal('recorded');
+            expect(result.frames).to.equal(4);
+            expect(inspector.recording).to.be.false;
+
+            const summary = result.summary;
+            expect(summary.range).to.deep.equal({ from: 1, to: 4, frames: 4 });
+            expect(summary.recording).to.be.false;
+            expect(summary.frameTime).to.deep.equal({ min: 16, avg: 16, p95: 16, max: 16 });
+            expect(summary.fps).to.equal(62.5);
+            // the inspector's own millisecond of each update is left out, and said to be
+            expect(summary.cpu.total).to.deep.equal({ min: 6, avg: 6, p95: 6, max: 6 });
+            expect(summary.cpu.update.avg).to.equal(3);
+            expect(summary.cpu.render.avg).to.equal(3);
+            expect(summary.inspectorTime).to.match(/left out .* 1 ms a frame/);
+            expect(summary.device.type).to.equal('null');
+            expect(summary.hitches.count).to.equal(0);
+            expect(JSON.stringify(summary).length).to.be.below(4096);
+
+            const counted = await inspector.executeTool('playcanvas_perf_summary', { includeInspector: true });
+            expect(counted.cpu.total.avg).to.equal(7);
+            expect(counted.cpu.inspector.avg).to.equal(1);
+        });
+
+        it('names the hitches, the longest first', async function () {
+            const pending = inspector.executeTool('playcanvas_perf_record', { frames: 6 });
+            run(3);
+            tick({ gap: 60 });
+            tick({ gap: 40 });
+            run(2);
+            const { summary } = await pending;
+            expect(summary.hitches.count).to.equal(2);
+            expect(summary.hitches.longest.map(h => h.frame)).to.deep.equal([4, 5]);
+            expect(summary.hitches.longest[0]).to.include({ interval: 67, cpu: 6 });
+        });
+
+        it('does not discard a capture the user recorded unless told to', async function () {
+            inspector.recording = true;
+            run(4);
+            inspector.recording = false;
+            expect((await inspector.executeTool('playcanvas_perf_status')).recordedBy).to.equal('user');
+
+            let error;
+            await inspector.executeTool('playcanvas_perf_record', { frames: 2 }).catch((e) => {
+                error = e;
+            });
+            expect(error?.message).to.match(/user recorded the 3 frames kept.*clear: true.*clear: false/);
+            expect(inspector._perf.count).to.equal(3);
+
+            // adding to it summarizes only the frames added
+            const adding = inspector.executeTool('playcanvas_perf_record', { frames: 2, clear: false });
+            run(3);
+            const added = await adding;
+            expect(added.summary.range).to.deep.equal({ from: 4, to: 5, frames: 2 });
+            expect(inspector._perf.count).to.equal(5);
+
+            // the agent's own capture is cleared without asking
+            const again = inspector.executeTool('playcanvas_perf_record', { frames: 1 });
+            run(2);
+            expect((await again).summary.range).to.deep.equal({ from: 1, to: 1, frames: 1 });
+        });
+
+        it('refuses to take over a recording the user is making, unless told to', async function () {
+            inspector.recording = true;
+            run(2);
+            let error;
+            await inspector.executeTool('playcanvas_perf_record', {}).catch((e) => {
+                error = e;
+            });
+            expect(error?.message).to.match(/user is recording/);
+            expect(inspector.recording).to.be.true;
+
+            const status = await inspector.executeTool('playcanvas_perf_record', { clear: true });
+            expect(status).to.include({ recording: true, frames: 0, recordedBy: 'agent' });
+            run(4);
+            const summary = await inspector.executeTool('playcanvas_perf_stop');
+            expect(inspector.recording).to.be.false;
+            expect(summary.range.frames).to.equal(3);
+        });
+
+        it('turns the timings on through the panel\'s switches', async function () {
+            app.systems.script = {
+                app,
+                ComponentType: class {
+                    _scriptMethod() {}
+                }
+            };
+            inspector.destroy();
+            inspector = /** @type {any} */ (new Inspector(app, { storageKey: null, mcp: true }));
+            let error;
+            await inspector.executeTool('playcanvas_perf_record', { gpuTimings: true }).catch((e) => {
+                error = e;
+            });
+            expect(error?.message).to.match(/cannot time the GPU/);
+
+            await inspector.executeTool('playcanvas_perf_record', { scriptTiming: true });
+            expect(inspector._perfScriptsToggle.checked).to.be.true;
+            expect((await inspector.executeTool('playcanvas_perf_status')).options.scriptTiming).to.be.true;
+        });
+
+        it('returns at once without waiting, and stops by itself', async function () {
+            const status = await inspector.executeTool('playcanvas_perf_record', { frames: 2, wait: false });
+            expect(status).to.include({ recording: true, framesLeft: 2 });
+            run(3);
+            expect(inspector.recording).to.be.false;
+            const summary = await inspector.executeTool('playcanvas_perf_summary');
+            expect(summary.range.frames).to.equal(2);
+        });
+
+        it('gives up when the frames do not come, as in a hidden page', async function () {
+            this.timeout(4000);
+            const result = await inspector.executeTool('playcanvas_perf_record', { frames: 10, timeout: 1 });
+            expect(result.ended).to.equal('timed out');
+            expect(result.frames).to.equal(0);
+            expect(result.note).to.match(/hidden/);
+            expect(result.status.recording).to.be.false;
+        });
+
+        it('ends the wait when the user stops recording, or MCP is turned off', async function () {
+            const pending = inspector.executeTool('playcanvas_perf_record', { frames: 10 });
+            run(3);
+            inspector.recording = false;
+            tick();
+            const result = await pending;
+            expect(result.ended).to.equal('stopped from the panel');
+            expect(result.summary.range.frames).to.equal(2);
+
+            const again = inspector.executeTool('playcanvas_perf_record', { frames: 10 });
+            inspector.mcp = false;
+            expect((await again).ended).to.equal('MCP turned off');
+            expect(inspector.recording).to.be.false;
+        });
+
+        it('returns a frame in full, and a series a page at a time, as JSON or CSV', async function () {
+            let error;
+            await inspector.executeTool('playcanvas_perf_frame', { frame: 1 }).catch((e) => {
+                error = e;
+            });
+            expect(error?.message).to.match(/Nothing is recorded/);
+
+            const pending = inspector.executeTool('playcanvas_perf_record', { frames: 5 });
+            run(6);
+            await pending;
+            const frame = await inspector.executeTool('playcanvas_perf_frame', { frame: 2 });
+            expect(frame).to.include({ frame: 2, interval: 16, hitch: false });
+            expect(frame.cpu).to.include({ update: 4, render: 3, inspector: 1 });
+            await inspector.executeTool('playcanvas_perf_frame', { frame: 9 }).catch((e) => {
+                error = e;
+            });
+            expect(error?.message).to.match(/Frames kept: 1 to 5/);
+
+            const series = await inspector.executeTool('playcanvas_perf_series', { key: 'cpu', from: 2, to: 3 });
+            expect(series.range).to.deep.equal({ from: 2, to: 3 });
+            expect(series.rows.map(row => row.frame)).to.deep.equal([2, 3]);
+            expect(series.rows[0]).to.include({ total: 7, update: 4, render: 3 });
+            expect(series).to.not.have.property('next');
+
+            const csv = await inspector.executeTool('playcanvas_perf_series', { key: 'frame', format: 'csv' });
+            expect(csv.csv).to.equal('frame,interval\n1,16\n2,16\n3,16\n4,16\n5,16\n');
+
+            await inspector.executeTool('playcanvas_perf_series', { key: 'shaders' }).catch((e) => {
+                error = e;
+            });
+            expect(error?.message).to.match(/must be one of/);
+        });
     });
 
     it('remembers the switch, shown on its toolbar button', function () {
