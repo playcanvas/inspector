@@ -10,14 +10,14 @@
 | [User Manual](https://developer.playcanvas.com) | [Blog](https://blog.playcanvas.com) | [Forum](https://forum.playcanvas.com) |
 
 A debug panel for running [PlayCanvas](https://github.com/playcanvas/engine) apps. It shows the entity
-hierarchy and every component's properties, and tabs for the cameras, assets, frame graph,
+hierarchy and every component's properties, and tabs for the cameras, layers, assets, frame graph,
 performance, render targets, textures, meshes, materials, scripts, memory, shaders and physics of
 the app, with live previews of textures and render targets, picking and flying in the view, and a
 debug frame mode that steps through the draw calls of a render pass.
 
 The inspector is read-only, apart from toggling entities on and off, pausing and stepping the app,
-and view-only overrides (render modes, wireframe, a flown or orbited camera) it removes when it
-closes.
+and view-only overrides (render modes, wireframe, a flown or orbited camera, hidden layers) it
+removes when it closes.
 
 ![The inspector docked beside a running app, with an entity selected in the hierarchy](docs/images/inspector.png)
 
@@ -53,6 +53,20 @@ entity.addComponent('script');
 entity.script.create(EntityInspector, { properties: { dock: 'left' } });
 app.root.addChild(entity);
 ```
+
+### Layers
+
+The Layers tab lists the layer composition in the order it renders. The opaque and transparent
+halves of a layer are ordered apart, so each has a row of its own, and a layer can render its
+halves far apart, as the World layer does around the Skybox. Each row counts the mesh instances of
+its half and the cameras rendering it; a row is dimmed when it draws nothing, being off or rendered
+by no camera. Select a layer for where its halves are in the composition, how each sorts, what it
+clears, its lights and mesh instances, and each camera rendering it with how many opaque and
+transparent instances that camera drew of it after culling, in the last frame.
+
+**Hide** on a layer turns it off to see the view without it. **Show all**, or closing the panel,
+turns the layers hidden this way back on. A layer the app has off cannot be hidden, and one the app
+turns back on itself is left to it.
 
 ### Step through a frame
 
@@ -211,7 +225,7 @@ No tool changes the app. These only read it:
 | `playcanvas_app_summary` | The engine version, graphics device and video memory, entity and asset counts, frame stats |
 | `playcanvas_index` | Everything in one call: the summary, every entity with its path and components, and every camera, material, texture, shader, mesh, render target, script, asset and pass with its figures |
 | `playcanvas_find_entities` | Entities by name, component type, script name and tag |
-| `playcanvas_list` | What a tab lists: `textures`, `shaders`, `materials`, `meshes`, `scripts`, `cameras`, `assets`, `renderTargets`, `passes` (the frame graph) or `memory` |
+| `playcanvas_list` | What a tab lists: `textures`, `shaders`, `materials`, `meshes`, `scripts`, `cameras`, `layers` (the composition in render order), `assets`, `renderTargets`, `passes` (the frame graph) or `memory` |
 | `playcanvas_get` | Any object by id, as its tab shows it |
 
 Every object returned carries an `$id`, such as `material:12`, which `playcanvas_get` takes, so an
