@@ -219,7 +219,7 @@ function describeOne(value, depth) {
             target: value.node
         };
     }
-    if (value instanceof Layer) return { text: `Layer "${value.name}" (id ${value.id})`, cls: 'obj' };
+    if (value instanceof Layer) return { text: `Layer "${value.name}" (id ${value.id})`, cls: 'obj', target: value };
     if (value instanceof Sprite) return { text: `Sprite ${value.frameKeys?.length ?? 0} frames`, cls: 'obj' };
 
     // DOM

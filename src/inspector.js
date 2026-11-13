@@ -1,5 +1,5 @@
 import {
-    Asset, Color, Component, Entity, FramePass, GraphNode, LAYERID_UI, Material, Mesh, MeshInstance, RenderPassForward, RenderTarget, Shader, Texture
+    Asset, Color, Component, Entity, FramePass, GraphNode, Layer, LAYERID_UI, Material, Mesh, MeshInstance, RenderPassForward, RenderTarget, Shader, Texture
 } from 'playcanvas';
 
 import { TextureRenderer } from './renderers/texture-renderer.js';
@@ -8,6 +8,7 @@ import { WireRenderer } from './renderers/wire-renderer.js';
 import { pushResourceUsage } from './asset-usage.js';
 import { ASSET_SORTS, assetRows, buildAssetModel, collectAssets } from './asset-view.js';
 import { buildCameraModel, cameraRows, collectCameras } from './camera-view.js';
+import { buildLayerModel, collectSubLayers, layerRows } from './layer-view.js';
 import { ContextMenu } from './context-menu.js';
 import { copyGroup, copyList, copyListRow, copySubject, stringifyCopy } from './copy-json.js';
 import { INSTANCES_PER_PAGE, LayerStepSelection, buildPassModel, buildStepModel, captureFrameGraph, passRows, profilerName } from './frame-graph-view.js';
@@ -149,6 +150,7 @@ const PERF_SERIES_NAMES = {
 const TAB_TIPS = {
     hierarchy: 'The entity tree, and the components and properties of the selected entity',
     cameras: 'The cameras of the scene in render order, with where they draw, their render mode and a way to fly each',
+    layers: 'The layers of the composition in the order they render, each opaque and transparent half apart, with the cameras, lights and mesh instances of each and a way to hide it',
     assets: 'The assets of the registry, and what uses each',
     passes: 'The passes that rendered the last frame, with the layers, draws and targets of each',
     perf: 'Record frames and chart their CPU and GPU time, draw calls, memory and events over the whole capture.\nClick a frame to see everything recorded for it, drag to select frames, scroll to zoom, Shift+drag to pan,\ndouble-click to see the whole capture. A dashed line marks the display interval, red ticks the hitches',
@@ -467,7 +469,7 @@ class Inspector {
     _nextPropertyRefresh = 0;
 
     /**
-     * @type {'hierarchy'|'cameras'|'assets'|'passes'|'perf'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'}
+     * @type {'hierarchy'|'cameras'|'layers'|'assets'|'passes'|'perf'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'}
      * @private
      */
     _tab = 'hierarchy';
@@ -733,6 +735,29 @@ class Inspector {
     _cameraList;
 
     /**
+     * @type {ListView}
+     * @private
+     */
+    _layerList;
+
+    /**
+     * The layers hidden from the Layers tab, each turned off until shown again, reset or the panel
+     * closes. A layer the app turns back on itself meanwhile is left to it.
+     *
+     * @type {Set<Layer>}
+     * @private
+     */
+    _hiddenLayers = new Set();
+
+    /**
+     * The button on the Layers tab that shows the hidden layers again.
+     *
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _showLayersBtn;
+
+    /**
      * The render mode applied from the Cameras tab.
      *
      * @type {HTMLSelectElement}
@@ -948,6 +973,21 @@ class Inspector {
             fly: target => this._startFly(target),
             flying: this._fly?.camera ?? null,
             unavailable: this._transformTool ? 'Turn the gizmo off to fly a camera' : null
+        }
+    });
+
+    /**
+     * Model builder for the property view when a layer is selected.
+     *
+     * @param {Layer} layer - The layer.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _layerModel = layer => buildLayerModel(layer, {
+        app: this._app,
+        layerActions: {
+            hide: (target, hidden) => this._hideLayer(target, hidden),
+            hidden: target => this._hiddenLayers.has(target)
         }
     });
 
@@ -1923,7 +1963,7 @@ class Inspector {
         const tabs = el('div', 'pci-tabs');
         this._tabButtons = {};
         const tabList = [
-            ['hierarchy', 'Hierarchy'], ['cameras', 'Cameras'], ['assets', 'Assets'], ['passes', 'Frame graph'], ['perf', 'Performance'],
+            ['hierarchy', 'Hierarchy'], ['cameras', 'Cameras'], ['layers', 'Layers'], ['assets', 'Assets'], ['passes', 'Frame graph'], ['perf', 'Performance'],
             ['targets', 'Render targets'], ['textures', 'Textures'], ['meshes', 'Meshes'], ['materials', 'Materials'], ['scripts', 'Scripts'], ['memory', 'Memory'],
             ['shaders', 'Shaders'], ['physics', 'Physics']
         ];
@@ -2100,6 +2140,17 @@ class Inspector {
         cameraBar.appendChild(this._resetViewBtn);
         const cameraList = el('div', 'pci-list');
         cameraPanel.append(cameraBar, cameraList);
+
+        // layers: the composition in render order, with a way to show the hidden ones again
+        const layerPanel = el('div', 'pci-listpanel');
+        const layerBar = el('div', 'pci-subbar');
+        this._showLayersBtn = /** @type {HTMLButtonElement} */ (el('button', 'pci-btn', 'Show all'));
+        setTip(this._showLayersBtn, 'Turn the layers hidden here back on');
+        this._showLayersBtn.disabled = true;
+        this._showLayersBtn.addEventListener('click', () => this._showHiddenLayers());
+        layerBar.appendChild(this._showLayersBtn);
+        const layerList = el('div', 'pci-list');
+        layerPanel.append(layerBar, layerList);
         this._renderMode.addEventListener('change', () => this._applyRenderMode());
         // choosing a camera shows its render mode, and changes nothing until a mode is picked
         this._renderScope.addEventListener('change', () => {
@@ -2183,11 +2234,12 @@ class Inspector {
             materials: materialPanel,
             scripts: scriptPanel,
             cameras: cameraPanel,
+            layers: layerPanel,
             memory: memoryPanel,
             shaders: shaderPanel,
             physics: physicsPanel
         };
-        this._hierarchyEl.append(tabs, filter, tree, cameraPanel, assetPanel, passPanel, perfPanel, targetPanel, texturePanel, meshPanel, materialPanel, scriptPanel, memoryPanel, shaderPanel, physicsPanel);
+        this._hierarchyEl.append(tabs, filter, tree, cameraPanel, layerPanel, assetPanel, passPanel, perfPanel, targetPanel, texturePanel, meshPanel, materialPanel, scriptPanel, memoryPanel, shaderPanel, physicsPanel);
 
         const splitter = el('div', 'pci-splitter');
         const properties = el('div', 'pci-properties');
@@ -2310,6 +2362,10 @@ class Inspector {
         }, target => this._selectAny(target));
         this._cameraList = new ListView(cameraList, (camera, key) => {
             if (this._tab === 'cameras') this._properties.setSubject(camera, this._cameraModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._layerList = new ListView(layerList, (layer, key) => {
+            if (this._tab === 'layers') this._properties.setSubject(layer, this._layerModel, key);
             this._updateStatus();
         }, target => this._selectAny(target));
         this._scriptList = new ListView(scriptList, (cls, key) => {
@@ -3253,7 +3309,7 @@ class Inspector {
     /**
      * Switches the list tab and points the property view at that tab's selection.
      *
-     * @param {'hierarchy'|'cameras'|'assets'|'passes'|'perf'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'} tab - The tab.
+     * @param {'hierarchy'|'cameras'|'layers'|'assets'|'passes'|'perf'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'} tab - The tab.
      * @private
      */
     _setTab(tab) {
@@ -3342,6 +3398,13 @@ class Inspector {
             if (camera !== this._properties.subject) {
                 this._properties.setSubject(camera, this._cameraModel, this._cameraList.selectedKey);
             }
+        } else if (this._tab === 'layers') {
+            this._pruneHiddenLayers();
+            this._layerList.setRows(layerRows(this._app, layer => this._hiddenLayers.has(layer)));
+            const layer = this._layerList.selected;
+            if (layer !== this._properties.subject) {
+                this._properties.setSubject(layer, this._layerModel, this._layerList.selectedKey);
+            }
         } else if (this._tab === 'scripts') {
             this._scriptList.setRows(scriptListRows(surveyScripts(this._app)));
             const cls = this._scriptList.selected;
@@ -3412,6 +3475,7 @@ class Inspector {
         this._materialList.filter = names;
         this._scriptList.filter = names;
         this._cameraList.filter = names;
+        this._layerList.filter = names;
         this._bodyList.filter = names;
         this._refreshLists(false);
         // the instances listed under a forward pass narrow with the filter too
@@ -3432,6 +3496,7 @@ class Inspector {
             materials: this._materialList,
             scripts: this._scriptList,
             cameras: this._cameraList,
+            layers: this._layerList,
             memory: this._bufferList,
             assets: this._assetList,
             physics: this._bodyList
@@ -3726,6 +3791,7 @@ class Inspector {
         if (obj instanceof Shader) return buildShaderModel(obj);
         if (obj instanceof Asset) return buildAssetModel(obj, ctx);
         if (isScriptClass(obj)) return buildScriptModel(/** @type {Function} */ (obj), ctx);
+        if (obj instanceof Layer) return this._layerModel(obj);
         if (obj instanceof Material) return buildMaterialModel(obj, ctx);
         if (obj instanceof Mesh) return buildMeshModel(obj, ctx);
         if (bufferKind(obj)) return buildBufferModel(obj, ctx);
@@ -3777,6 +3843,9 @@ class Inspector {
         } else if (isScriptClass(target)) {
             this._setTab('scripts');
             this._scriptList.selectItem(target);
+        } else if (target instanceof Layer) {
+            this._setTab('layers');
+            this._layerList.selectItem(target);
         } else if (target instanceof Material) {
             this._setTab('materials');
             this._materialList.selectItem(target);
@@ -3988,6 +4057,15 @@ class Inspector {
                 const screen = cameras.filter(isScreenCamera).length;
                 counts = `${cameras.length} cameras · ${screen} drawing to the screen`;
                 selected = this._cameraList.selected?.entity.name ?? '';
+                break;
+            }
+            case 'layers': {
+                const subLayers = collectSubLayers(this._app.scene?.layers);
+                const layers = new Set(subLayers.map(sub => sub.layer));
+                const rendering = subLayers.filter(sub => sub.enabled && sub.layer.cameras.length > 0).length;
+                counts = `${layers.size} layers · ${subLayers.length} in the composition · ${rendering} rendering`;
+                if (this._hiddenLayers.size) counts += ` · ${this._hiddenLayers.size} hidden`;
+                selected = this._layerList.selected?.name ?? '';
                 break;
             }
             case 'scripts': {
@@ -4255,7 +4333,64 @@ class Inspector {
         this._stopFly();
         this._setTransformMode(null);
         this._resetRenderOverrides();
+        this._showHiddenLayers();
         this._modeEl.textContent = '';
+    }
+
+    /**
+     * Hides a layer from the view by turning it off, or turns a layer hidden here back on. Only a
+     * layer the app has on can be hidden, so showing it again restores what the app had.
+     *
+     * @param {Layer} layer - The layer.
+     * @param {boolean} hidden - Whether to hide it.
+     * @private
+     */
+    _hideLayer(layer, hidden) {
+        if (hidden) {
+            if (!layer.enabled || this._hiddenLayers.has(layer)) return;
+            this._hiddenLayers.add(layer);
+            layer.enabled = false;
+        } else {
+            if (!this._hiddenLayers.delete(layer)) return;
+            layer.enabled = true;
+        }
+        this._afterLayersChanged();
+    }
+
+    /**
+     * Turns every layer hidden here back on.
+     *
+     * @private
+     */
+    _showHiddenLayers() {
+        if (this._hiddenLayers.size === 0) return;
+        for (const layer of this._hiddenLayers) layer.enabled = true;
+        this._hiddenLayers.clear();
+        this._afterLayersChanged();
+    }
+
+    /**
+     * Forgets the hidden layers the app has turned back on itself, or taken out of the composition,
+     * so the panel never turns on a layer it no longer hides.
+     *
+     * @private
+     */
+    _pruneHiddenLayers() {
+        const composition = this._app.scene?.layers;
+        for (const layer of this._hiddenLayers) {
+            if (layer.enabled || !composition?.layerList.includes(layer)) this._hiddenLayers.delete(layer);
+        }
+        if (this._showLayersBtn) this._showLayersBtn.disabled = this._hiddenLayers.size === 0;
+    }
+
+    /**
+     * @private
+     */
+    _afterLayersChanged() {
+        if (this._showLayersBtn) this._showLayersBtn.disabled = this._hiddenLayers.size === 0;
+        this._refreshLists(false);
+        this._properties.refresh();
+        this._updateStatus();
     }
 
     /**
