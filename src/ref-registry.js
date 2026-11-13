@@ -1,4 +1,4 @@
-import { Asset, Component, FramePass, GraphNode, Material, Mesh, MeshInstance, RenderTarget, Shader, Texture } from 'playcanvas';
+import { Asset, Component, FramePass, GraphNode, Layer, Material, Mesh, MeshInstance, RenderTarget, Shader, Texture } from 'playcanvas';
 
 import { LayerStepSelection } from './frame-graph-view.js';
 import { isScriptClass } from './script-view.js';
@@ -19,6 +19,7 @@ function kindOf(obj) {
     if (obj instanceof FramePass) return 'pass';
     if (obj instanceof LayerStepSelection) return 'step';
     if (obj instanceof Asset) return 'asset';
+    if (obj instanceof Layer) return 'layer';
     if (isScriptClass(obj)) return 'script';
     return 'object';
 }

@@ -1,5 +1,5 @@
 import {
-    Asset, AssetRegistry, BindGroupFormat, BindStorageBufferFormat, BindTextureFormat, BindUniformBufferFormat, BLEND_NORMAL, Color, createScript, Entity, EventHandler, FILTER_LINEAR, FILTER_NEAREST, FUNC_LESS, GraphNode, Mesh, MeshInstance, NullGraphicsDevice, PIXELFORMAT_111110F, PIXELFORMAT_ASTC_4x4, PIXELFORMAT_ATC_RGB, PIXELFORMAT_BC7, PIXELFORMAT_BGRA8, PIXELFORMAT_DEPTH, PIXELFORMAT_DXT1, PIXELFORMAT_R32U, PIXELFORMAT_R8, PIXELFORMAT_RG16F, PIXELFORMAT_RGB10A2, PIXELFORMAT_RGB9E5, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA8, PIXELFORMAT_SRGB8, PROJECTION_ORTHOGRAPHIC, RenderPassForward, RENDERSTYLE_POINTS, RENDERSTYLE_SOLID, RENDERSTYLE_WIREFRAME, RenderTarget, SAMPLETYPE_DEPTH, Script, ScriptRegistry, SEMANTIC_POSITION, Shader, SHADERLANGUAGE_WGSL, SHADERSTAGE_COMPUTE, SHADERSTAGE_FRAGMENT, SHADERSTAGE_VERTEX, StandardMaterial, StorageBuffer, Texture, TEXTUREDIMENSION_2D, UniformBufferFormat, UniformFormat, UNIFORMTYPE_FLOAT, UNIFORMTYPE_MAT4, UNIFORMTYPE_VEC3, Vec3, Vec4
+    Asset, AssetRegistry, BindGroupFormat, BindStorageBufferFormat, BindTextureFormat, BindUniformBufferFormat, BLEND_NORMAL, Color, createScript, Entity, EventHandler, FILTER_LINEAR, FILTER_NEAREST, FUNC_LESS, GraphNode, Layer, LayerComposition, Mesh, MeshInstance, NullGraphicsDevice, PIXELFORMAT_111110F, PIXELFORMAT_ASTC_4x4, PIXELFORMAT_ATC_RGB, PIXELFORMAT_BC7, PIXELFORMAT_BGRA8, PIXELFORMAT_DEPTH, PIXELFORMAT_DXT1, PIXELFORMAT_R32U, PIXELFORMAT_R8, PIXELFORMAT_RG16F, PIXELFORMAT_RGB10A2, PIXELFORMAT_RGB9E5, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA8, PIXELFORMAT_SRGB8, PROJECTION_ORTHOGRAPHIC, RenderPassForward, RENDERSTYLE_POINTS, RENDERSTYLE_SOLID, RENDERSTYLE_WIREFRAME, RenderTarget, SAMPLETYPE_DEPTH, Script, ScriptRegistry, SEMANTIC_POSITION, Shader, SHADERLANGUAGE_WGSL, SHADERSTAGE_COMPUTE, SHADERSTAGE_FRAGMENT, SHADERSTAGE_VERTEX, StandardMaterial, StorageBuffer, Texture, TEXTUREDIMENSION_2D, UniformBufferFormat, UniformFormat, UNIFORMTYPE_FLOAT, UNIFORMTYPE_MAT4, UNIFORMTYPE_VEC3, Vec3, Vec4
 } from 'playcanvas';
 
 import { expect } from 'chai';
@@ -7,6 +7,7 @@ import { expect } from 'chai';
 import { pushResourceUsage, resourceUsers } from '../src/asset-usage.js';
 import { assetRows, assetUsers, buildAssetModel, collectAssets, describeAssetValue, resourceAssets } from '../src/asset-view.js';
 import { buildCameraModel, cameraRows } from '../src/camera-view.js';
+import { buildLayerModel, collectSubLayers, layerRows } from '../src/layer-view.js';
 import { collectProperties, describeValue, formatNumber } from '../src/describe.js';
 import { LayerStepSelection, buildPassModel, buildStepModel, captureFrameGraph, passRows } from '../src/frame-graph-view.js';
 import { HierarchyView, filterSuggestions, matchesFilter } from '../src/hierarchy-view.js';
@@ -3225,5 +3226,142 @@ describe('Inspector value formatting', function () {
         }
         expect(collectProperties(new Component(), [])).to.deep.equal(['current', 'legacy']);
         expect(calls).to.deep.equal([]);
+    });
+});
+
+describe('Inspector layers view', function () {
+    beforeEach(function () {
+        jsdomSetup();
+    });
+
+    afterEach(function () {
+        jsdomTeardown();
+    });
+
+    /**
+     * @returns {{ app: any, world: Layer, skybox: Layer, ui: Layer }} An app whose composition has a
+     * World layer split around a Skybox, and a UI layer drawn transparent only.
+     */
+    function layeredApp() {
+        const app = createApp();
+        const composition = new LayerComposition('test');
+        const world = new Layer({ id: 100, name: 'World' });
+        const skybox = new Layer({ id: 101, name: 'Skybox' });
+        const ui = new Layer({ id: 102, name: 'UI' });
+        composition.pushOpaque(world);
+        composition.pushOpaque(skybox);
+        composition.pushTransparent(world);
+        composition.pushTransparent(ui);
+        app.scene.layers = composition;
+        return { app, world, skybox, ui };
+    }
+
+    it('lists each half of each layer in the order the composition renders them', function () {
+        const { app, world, ui } = layeredApp();
+        const rows = layerRows(app);
+        expect(rows.map(row => `${row.name} ${row.cells[2].text}`)).to.deep.equal([
+            'World opaque', 'Skybox opaque', 'World transparent', 'UI transparent'
+        ]);
+        expect(rows.map(row => row.key)).to.deep.equal(['layer100o', 'layer101o', 'layer100t', 'layer102t']);
+        expect(rows[0].item).to.equal(world);
+        expect(rows[3].item).to.equal(ui);
+        // no camera renders them, so they show nothing
+        expect(rows.every(row => row.dim)).to.be.true;
+        expect(collectSubLayers(app.scene.layers).map(sub => sub.index)).to.deep.equal([0, 1, 2, 3]);
+    });
+
+    it('counts the instances of each half and tags layers that are off', function () {
+        const { app, world, skybox } = layeredApp();
+        const node = new GraphNode('mesh');
+        const opaque = new MeshInstance(new Mesh(app.graphicsDevice), new StandardMaterial(), node);
+        const transparentMaterial = new StandardMaterial();
+        transparentMaterial.blendType = BLEND_NORMAL;
+        const transparent = new MeshInstance(new Mesh(app.graphicsDevice), transparentMaterial, node);
+        world.addMeshInstances([opaque, transparent]);
+        world.cameras.push(/** @type {any} */ ({ entity: new GraphNode('Camera'), camera: {} }));
+        skybox.enabled = false;
+
+        const rows = layerRows(app, layer => layer === world);
+        expect(rows[0].cells.at(-1).text).to.equal('id 100 · 1 instances · 1 camera');
+        expect(rows[2].cells.at(-1).text).to.equal('id 100 · 1 instances · 1 camera');
+        expect(rows[0].cells.map(cell => cell.text)).to.include('hidden');
+        expect(rows[1].cells.map(cell => cell.text)).to.include('off');
+        expect(rows[0].dim).to.be.false;
+    });
+
+    it('shows where the halves render, their sorting, cameras and content', function () {
+        const { app, world } = layeredApp();
+        const camera = /** @type {any} */ ({ entity: new GraphNode('Main'), camera: {} });
+        world.cameras.push(camera);
+        world._visibleInstances.set(camera.camera, { opaque: [1, 2, 3], transparent: [4] });
+        const sections = buildLayerModel(world, { app, layerActions: { hide: () => {}, hidden: () => false } });
+        const rows = Object.fromEntries(sections.map(section => [section.key, Object.fromEntries(section.rows.map(row => [row.label, row.value]))]));
+        expect(rows.layer.opaque.text).to.equal('0 in the composition');
+        expect(rows.layer.transparent.text).to.equal('2 in the composition');
+        expect(rows.layer['opaque sort'].text).to.equal('material, mesh');
+        expect(rows.layer['transparent sort'].text).to.equal('back to front');
+        expect(rows.cameras.Main.text).to.equal('drew 3 opaque, 1 transparent');
+        expect(rows.cameras.Main.target).to.equal(camera.entity);
+        expect(rows.content['mesh instances'].text).to.equal('[]');
+    });
+
+    it('numbers cameras that share a name, as rows are keyed by their label', function () {
+        const { app, world } = layeredApp();
+        world.cameras.push(/** @type {any} */ ({ entity: new GraphNode('Cam'), camera: {} }), /** @type {any} */ ({ entity: new GraphNode('Cam'), camera: {} }));
+        const [, cameras] = buildLayerModel(world, { app, layerActions: { hide: () => {}, hidden: () => false } });
+        expect(cameras.rows.map(row => row.label)).to.deep.equal(['Cam', 'Cam (2)']);
+    });
+
+    it('hides a layer from the view, and turns it back on when shown, reset or closed', function () {
+        const { app, world, ui } = layeredApp();
+        const inspector = /** @type {any} */ (new Inspector(app));
+        inspector._setTab('layers');
+        expect(inspector._layerList.rows.length).to.equal(4);
+
+        const hide = layer => inspector._layerModel(layer)[0].rows.find(row => row.label === 'view').value.actions[0];
+        expect(hide(world).text).to.equal('Hide');
+        hide(world).run();
+        expect(world.enabled).to.be.false;
+        expect(inspector._showLayersBtn.disabled).to.be.false;
+        expect(hide(world).text).to.equal('Show');
+        hide(world).run();
+        expect(world.enabled).to.be.true;
+        expect(inspector._showLayersBtn.disabled).to.be.true;
+
+        // a layer the app turned off is not the panel's to hide
+        ui.enabled = false;
+        expect(hide(ui).disabled).to.be.true;
+        ui.enabled = true;
+
+        hide(world).run();
+        hide(ui).run();
+        inspector._showLayersBtn.click();
+        expect([world.enabled, ui.enabled]).to.deep.equal([true, true]);
+
+        // the app turning a hidden layer back on takes it from the panel, which then leaves it alone
+        hide(world).run();
+        world.enabled = true;
+        inspector._refreshLists(false);
+        world.enabled = false;
+        inspector.destroy();
+        expect(world.enabled).to.be.false;
+
+        const again = /** @type {any} */ (new Inspector(app));
+        world.enabled = true;
+        again._hideLayer(world, true);
+        again.destroy();
+        expect(world.enabled).to.be.true;
+    });
+
+    it('opens a layer reached through a link on the Layers tab', function () {
+        const { app, ui } = layeredApp();
+        const inspector = /** @type {any} */ (new Inspector(app));
+        const value = describeValue(ui);
+        expect(value.target).to.equal(ui);
+        inspector._selectAny(value.target);
+        expect(inspector._tab).to.equal('layers');
+        expect(inspector._layerList.selected).to.equal(ui);
+        expect(inspector._copyModel(ui, {})[0].title).to.equal('Layer "UI"');
+        inspector.destroy();
     });
 });

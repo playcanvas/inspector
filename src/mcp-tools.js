@@ -2,6 +2,7 @@ import { Material, RenderTarget, Texture, revision, version } from 'playcanvas';
 
 import { assetRows } from './asset-view.js';
 import { cameraRows } from './camera-view.js';
+import { layerRows } from './layer-view.js';
 import { copyListRow, copySubject } from './copy-json.js';
 import { passRows } from './frame-graph-view.js';
 import { matchesFilter } from './hierarchy-view.js';
@@ -118,7 +119,7 @@ const MAX_LIMIT = 500;
 const MAX_DEPTH = 4;
 
 // the lists an index holds, and the most entries of each, so even a huge app gives a bounded index
-const INDEX_LISTS = ['cameras', 'materials', 'textures', 'shaders', 'meshes', 'renderTargets', 'scripts', 'assets', 'passes'];
+const INDEX_LISTS = ['cameras', 'layers', 'materials', 'textures', 'shaders', 'meshes', 'renderTargets', 'scripts', 'assets', 'passes'];
 const MAX_INDEX_ENTRIES = 2000;
 
 // how many objects a get copies in full, so a deep get of a big scene stays a sensible size
@@ -136,6 +137,7 @@ const LISTS = {
     meshes: ({ app }) => meshListRows(surveyMeshes(app)),
     scripts: ({ app }) => scriptListRows(surveyScripts(app)),
     cameras: ({ app }) => cameraRows(app, null),
+    layers: ({ app }) => layerRows(app),
     assets: ({ app }) => assetRows(app.assets, 'type'),
     renderTargets: host => renderTargetRows(host.app.graphicsDevice, host.frame()),
     passes: host => passRows(host.frame(), host.app.graphicsDevice),
@@ -960,7 +962,8 @@ const TOOLS = [{
 }, {
     name: 'playcanvas_list',
     description: 'List what one tab of the inspector lists: textures, shaders, materials, meshes, scripts, ' +
-        'cameras, assets, renderTargets, passes (the frame graph of the last frame) or memory (GPU buffers ' +
+        'cameras, layers (the layer composition in render order), assets, renderTargets, passes (the frame graph ' +
+        'of the last frame) or memory (GPU buffers ' +
         'and textures by kind). Each entry has an id to pass to playcanvas_get, and the figures the list shows.',
     inputSchema: {
         type: 'object',
@@ -977,7 +980,7 @@ const TOOLS = [{
 }, {
     name: 'playcanvas_get',
     description: 'Get an object by id, as the inspector shows it: an entity with its components, a mesh ' +
-        'instance, material, shader, texture, mesh, render target, pass, asset, script or buffer. Every object ' +
+        'instance, material, shader, texture, mesh, render target, pass, layer, asset, script or buffer. Every object ' +
         'it links to carries an $id to get next, so links can be followed, such as entity -> render component ' +
         '-> mesh instance -> material -> shader. Lists of what uses the object, and a node\'s parent, are ' +
         'included as references. depth follows links in place, up to 4 away: 0 returns the object alone. ' +
